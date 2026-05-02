@@ -55,6 +55,16 @@ scrubbing means the on-disk SQLite never holds plaintext secrets. Dedup uses
 `src/recall/scrub.py` or `tests/test_scrub.py` if the scrub test count
 decreases (see `scrub-canary` job in `.github/workflows/ci.yml`).
 
+**Canary end-to-end verification status (as of Commit 1.2):** the workflow's
+shell logic was manually validated locally — path filter, base/head count
+differentiation, comparison, and working-tree restoration all confirmed.
+But the job has never actually run on real GitHub Actions (the repo has no
+remote yet — first push is intentionally deferred to the end of Phase 1).
+**The 1.2 PR is the implicit end-to-end verification.** When 1.2's PR opens
+against the freshly pushed remote, the `scrub-canary` job MUST appear in the
+Actions tab and execute. If it doesn't appear at all, the path filter or
+trigger is wrong and that is a 1.2 blocker — fix before merging anything.
+
 ### 2. zsh extended_history format
 
 Handle `: <ts>:<dur>;<command>`, plain (no leading `:`) format, multi-line
@@ -172,4 +182,12 @@ uv run mypy src                  # strict type check
 - Never `print()` to stdout in code paths that may run under the stdio MCP
   transport. Use `logging` (stderr or file).
 - Never write to the user's atuin DB. Always open `?mode=ro&immutable=1`.
-- Never commit raw history fixtures with real secrets. Synthesize them.
+- Never commit raw history fixtures with real secrets. Synthesize them
+  with the canonical sentinel string `FAKEFAKE` so they cannot match
+  real-world secret patterns and cannot trip GitHub's secret scanner.
+  A grep for `FAKEFAKE` across `tests/fixtures/secrets_corpus.txt` must
+  yield at least one match per non-comment line.
+- **GitHub remote / first push is deferred to the end of Phase 1.** The
+  first push should land a coherent Phase 1 (foundations + scrubber + db +
+  source readers), not a half-built skeleton. Don't create the remote
+  earlier even if the prompt to do so is tempting.

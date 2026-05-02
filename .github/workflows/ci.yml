@@ -95,16 +95,27 @@ jobs:
         if: steps.touched.outputs.touched == '1'
         id: base
         run: |
-          git stash push -- tests/test_scrub.py src/recall/scrub.py 2>/dev/null || true
-          git checkout origin/${{ github.base_ref }} -- tests/test_scrub.py src/recall/scrub.py 2>/dev/null || true
+          base_ref="origin/${{ github.base_ref }}"
+          # Stash isn't reliable here: PR branches usually have these files
+          # committed, not modified, so stash skips them. cp to /tmp instead so
+          # save+restore works whether the file was committed, modified, or new.
+          [ -f tests/test_scrub.py ] && cp tests/test_scrub.py /tmp/head_test_scrub.py
+          [ -f src/recall/scrub.py ] && cp src/recall/scrub.py /tmp/head_scrub.py
+          # Wipe, then ask git for base's version. If base lacks the file, it
+          # stays absent — which is the correct count=0 case for new-file PRs.
+          rm -f tests/test_scrub.py src/recall/scrub.py
+          git checkout "$base_ref" -- tests/test_scrub.py 2>/dev/null || true
+          git checkout "$base_ref" -- src/recall/scrub.py 2>/dev/null || true
           if [ -f tests/test_scrub.py ]; then
             count=$(uv run pytest --collect-only -q tests/test_scrub.py 2>/dev/null | grep -c '::' || true)
           else
             count=0
           fi
           echo "count=$count" >> "$GITHUB_OUTPUT"
-          git checkout HEAD -- tests/test_scrub.py src/recall/scrub.py 2>/dev/null || true
-          git stash pop 2>/dev/null || true
+          # Restore head versions so subsequent steps / jobs see HEAD's tree.
+          rm -f tests/test_scrub.py src/recall/scrub.py
+          [ -f /tmp/head_test_scrub.py ] && cp /tmp/head_test_scrub.py tests/test_scrub.py
+          [ -f /tmp/head_scrub.py ] && cp /tmp/head_scrub.py src/recall/scrub.py
       - name: assert non-decreasing
         if: steps.touched.outputs.touched == '1'
         run: |

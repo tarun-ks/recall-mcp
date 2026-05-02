@@ -86,6 +86,29 @@ Handle `: <ts>:<dur>;<command>`, plain (no leading `:`) format, multi-line
 continuations (trailing `\`), and invalid UTF-8 (latin-1 fallback). Never
 crash on a malformed line — log and skip.
 
+### 2a. HistorySource protocol semantics
+
+All sources implement `HistorySource` (in `src/recall/sources/base.py`) and
+expose exactly one method:
+
+`iter_entries(since: int | None = None) -> Iterator[Entry]`
+
+- `since` is **wall-clock unix seconds**. Wall-clock is the only definition
+  that survives multi-source merging in the Phase 2 indexer (atuin's
+  nanosecond timestamps, zsh's `EXTENDED_HISTORY` seconds, and bash's
+  `HISTTIMEFORMAT` seconds all collapse to the same axis). Sources that
+  store other units convert at the iterator boundary.
+- Sources yield entries with `ts > since` in source-native order. Sources
+  MAY also emit entries with `ts <= since` if they detect a cursor
+  mismatch (histfile rewrite, file truncated and rebuilt, etc.) — that
+  backfill-on-mismatch logic is encapsulated per source. The Phase 2
+  indexer deduplicates on `UNIQUE(source, text_hash, ts)` regardless.
+- Entries with an unknown timestamp emit `ts = 0` and are **always** yielded
+  regardless of `since` (no way to know if they're old or new; the indexer's
+  UNIQUE constraint catches duplicates).
+- Sources are stateless across calls. Each `iter_entries` opens whatever
+  file or DB it needs and closes when the iterator is exhausted.
+
 ### 3. atuin schema robustness
 
 Open the user's atuin database with `?mode=ro&immutable=1` so we never write
@@ -139,10 +162,12 @@ for orchestrating "clear → rotate → re-index." Mechanism vs. policy.
 - Long operations (initial index) never run during tool calls. The server
   refuses to serve queries until the index exists; the CLI does the indexing.
 - **stdio transport must not write anything to stdout except MCP frames.**
-  All logging goes to stderr or `~/.recall/logs/recall.log`. A single stray
-  `print()` silently breaks the server. There is a CI test (Phase 3) that
-  spawns the server, sends `initialize`, and asserts every line on stdout is
-  a valid MCP JSON-RPC frame.
+  All logging goes to stderr (Phase 1) or `~/.recall/logs/recall.log`
+  (added in Phase 3 by `server.py` as a rotating file handler). Until
+  Phase 3 lands, stderr-only is correct. A single stray `print()` silently
+  breaks the server. There is a CI test (Phase 3) that spawns the server,
+  sends `initialize`, and asserts every line on stdout is a valid MCP
+  JSON-RPC frame.
 
 ### 6. Performance budgets (CI-enforced, Phase 3+)
 
@@ -217,6 +242,37 @@ uv run ruff format --check .     # CI: format check only
 uv run mypy src                  # strict type check
 ```
 
+## Composition is where bugs live
+
+Two consecutive commits (1.2 and 1.3) found bugs of identical shape:
+
+- **1.2 — `URL_USERINFO` vs `<REDACTED:GITHUB_TOKEN>`.** The userinfo
+  regex was correct in isolation. After `GITHUB_TOKEN` had run, it met
+  `<REDACTED:GITHUB_TOKEN>` and re-interpreted `<REDACTED` / `:` /
+  `GITHUB_TOKEN>` as user / sep / pass — clobbering the GitHub redaction.
+  Each pattern was right alone. Fix: exclude `<` and `>` from the userinfo
+  char classes.
+- **1.3 — `migrate()` wrapping `executescript()` in `transaction()`.**
+  In autocommit mode each function was correct alone. Composed,
+  `executescript` issued an implicit COMMIT before running, leaving no
+  open transaction for `transaction()`'s explicit COMMIT — every test
+  using the migrated DB exploded with `cannot commit - no transaction is
+  active`. Fix: don't wrap.
+
+**Pattern:** primitives correct in isolation, broken at the boundary.
+
+**Discipline:** when introducing a new primitive that interacts with
+existing ones, write the *composition test first*. Don't trust that the
+Cartesian product of correct primitives is correct. The shape this rule
+catches: regex pack ordering / idempotency, transaction managers around
+DDL, signal handlers during async work, decorators stacked unaware of
+each other, etc. When you can't easily express the boundary as a test,
+the design probably has the wrong split.
+
+When a real composition bug is caught mid-suite, the handoff report MUST
+name the root cause + fix + an inline-comment-for-future-contributors
+(so the next session sees the trap before re-stepping in it).
+
 ## Deferred items (file as GitHub issues at end of Phase 1)
 
 These were called out and intentionally deferred. File them as GitHub
@@ -230,6 +286,31 @@ don't get lost in chat history.
   GCP service-account JSON inline, `~/.netrc` / `~/.pgpass` references,
   generic `password:` (colon, no `=`), base64-encoded secrets pasted as
   positional args.
+
+## End-of-Phase-1 checklist
+
+Run this checklist at the Phase 1 / Phase 2 boundary, BEFORE starting
+Phase 2 work:
+
+- [ ] All four Phase 1 commits landed (1.1, 1.2, 1.3, 1.4); tree is clean.
+- [ ] `pytest -k scrub` (canary) and full `pytest` both pass on `main`.
+- [ ] Create the GitHub remote and push `main`. The first PR opened
+      against this remote will exercise the `scrub-canary` job for real
+      (its end-to-end execution has been unverified up to this point —
+      see §1). **If the `scrub-canary` job does not appear in the
+      Actions tab on that PR, the path filter or trigger is wrong; fix
+      before merging anything else.**
+- [ ] File deferred items as GitHub issues (see "Deferred items"). Tag
+      the scrubber-coverage gap as `v1-launch-blocker`.
+- [ ] Decide on Python 3.13 autocommit semantics: the CI fast lane
+      includes 3.13, and `db.transaction()` relies on legacy
+      `isolation_level=None` autocommit behavior. If 3.13 breaks on first
+      remote run, switch the connection to `autocommit=True` (small fix);
+      if green, no action needed.
+- [ ] README skeleton update is a Phase 4 deliverable, but the GitHub
+      repo's first impression matters — at minimum, mark "Status:
+      pre-alpha, Phase 1 complete" in the readme on first push so
+      drive-by visitors aren't confused.
 
 ## Workflow expectations
 

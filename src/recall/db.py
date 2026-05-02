@@ -19,6 +19,7 @@ Logging goes to stderr / `~/.recall/logs/recall.log` only — never stdout
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import sqlite3
 from collections.abc import Iterator
@@ -34,9 +35,17 @@ from recall.scrub import SCRUBBER_VERSION
 _LOG = logging.getLogger("recall.db")
 
 _CURRENT_SCHEMA_VERSION = 1
-_DEFAULT_DB_PATH = Path.home() / ".recall" / "db.sqlite"
 _DEDUP_SALT_BYTES = 32  # 256 bits
 _DEDUP_HASH_DIGEST_SIZE = 32  # BLAKE2b output bytes; matches BLOB column width
+
+
+def _default_db_path() -> Path:
+    """Resolve the default DB path. ``RECALL_DB_PATH`` env override beats the
+    built-in default; both are evaluated lazily at every ``connect()`` call."""
+    override = os.environ.get("RECALL_DB_PATH")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".recall" / "db.sqlite"
 
 
 class DBError(Exception):
@@ -67,7 +76,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     ``~/.recall/db.sqlite``). Returns a connection with sqlite-vec loaded
     and PRAGMAs set. Caller is responsible for ``migrate(conn)``.
     """
-    db_path = path if path is not None else _DEFAULT_DB_PATH
+    db_path = path if path is not None else _default_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, isolation_level=None)
     conn.row_factory = sqlite3.Row

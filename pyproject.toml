@@ -29,6 +29,7 @@ classifiers = [
 ]
 dependencies = [
   "pydantic>=2.13",
+  "sqlite-vec>=0.1.6",
 ]
 
 [project.scripts]
@@ -74,6 +75,10 @@ quote-style = "double"
 strict = true
 files = ["src"]
 python_version = "3.11"
+
+[[tool.mypy.overrides]]
+module = ["sqlite_vec", "sqlite_vec.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

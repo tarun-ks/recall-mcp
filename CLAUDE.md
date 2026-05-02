@@ -55,6 +55,21 @@ scrubbing means the on-disk SQLite never holds plaintext secrets. Dedup uses
 `src/recall/scrub.py` or `tests/test_scrub.py` if the scrub test count
 decreases (see `scrub-canary` job in `.github/workflows/ci.yml`).
 
+**Adding a new scrubber pattern — required additions:**
+1. **Idempotency check.** Verify the new pattern doesn't match against
+   `<REDACTED:*>` markers from any other pattern. Idempotency is by
+   construction *only* if patterns are mutually exclusive on their
+   replacements (cf. the `URL_USERINFO`-vs-`<REDACTED:GITHUB_TOKEN>` bug
+   fixed in 1.2 where `<` `>` weren't excluded from the userinfo char
+   classes). **Add at least one idempotency test per new pattern**, even
+   if `test_idempotent` already runs over your input — explicit beats
+   implicit when patterns interact.
+2. **Corpus growth.** Add ≥ 1 positive AND ≥ 1 negative line to
+   `tests/fixtures/secrets_corpus.txt` for the new pattern. The corpus
+   integrity test (`test_corpus_no_known_leaks`) scales in value with
+   corpus diversity — a per-test case that misses a leak still has to
+   pass the corpus pass.
+
 **Canary end-to-end verification status (as of Commit 1.2):** the workflow's
 shell logic was manually validated locally — path filter, base/head count
 differentiation, comparison, and working-tree restoration all confirmed.
@@ -83,6 +98,38 @@ Store embedding model name + revision in the `meta` table on first index.
 On startup, refuse queries if the configured model differs from the indexed
 one — prompt the user to run `recall index --rebuild`. Mixing embeddings
 across models silently produces garbage results.
+
+### 4a. Dedup salt and rebuild policy
+
+The dedup hash is `BLAKE2b(salt ‖ raw_text)`, output 32 bytes, stored as
+`commands.text_hash`. The salt lives in `meta.dedup_salt` (hex), with
+`meta.dedup_salt_version` tracking rotations.
+
+**Lifecycle (all flags described here are spec for `recall index`, which
+lands in Commit 2.7):**
+
+| Command | Salt | Commands table |
+| --- | --- | --- |
+| `recall index` (incremental) | unchanged | append-only |
+| `recall index --rebuild` | **unchanged** (default — conservative) | cleared, refilled |
+| `recall index --rebuild --new-salt` | rotated, version++ | cleared, refilled |
+| `recall index --new-salt` (no `--rebuild`) | **rejected with error** | n/a |
+
+**Invariant:** every row's `text_hash` was computed with the salt current
+at the time of insertion. Salt rotation MUST be paired with full
+re-insertion of all rows (otherwise old-salt and new-salt hashes coexist
+in one table, silently breaking dedup). The CLI rejects `--new-salt`
+without `--rebuild` for this reason.
+
+**Why the default preserves the salt across rebuilds:** identical raw
+text hashes to the same value before and after a rebuild, so external
+tooling and incremental syncs against the post-rebuild DB stay coherent.
+`--new-salt` is an explicit escape hatch for users who suspect their salt
+is corrupted; the CLI help text documents the tradeoff.
+
+**API split:** `db.py` exposes `rotate_dedup_salt(conn)` as a primitive
+that does NOT enforce the rebuild combination — the CLI is responsible
+for orchestrating "clear → rotate → re-index." Mechanism vs. policy.
 
 ### 5. MCP protocol cleanliness
 
@@ -169,6 +216,20 @@ uv run ruff format .             # apply formatting
 uv run ruff format --check .     # CI: format check only
 uv run mypy src                  # strict type check
 ```
+
+## Deferred items (file as GitHub issues at end of Phase 1)
+
+These were called out and intentionally deferred. File them as GitHub
+issues when the remote lands at the Phase 1 / Phase 2 boundary, so they
+don't get lost in chat history.
+
+- **Scrubber coverage gaps** — tag `v1-launch-blocker`. Highest priority
+  adds: Stripe (`sk_live_…`, `pk_live_…`) and npm tokens (`npm_…`).
+  Lower priority: Twilio account SIDs, Heroku / Cloudflare API tokens,
+  Discord bot tokens, MongoDB connection strings without `://user:pass@`,
+  GCP service-account JSON inline, `~/.netrc` / `~/.pgpass` references,
+  generic `password:` (colon, no `=`), base64-encoded secrets pasted as
+  positional args.
 
 ## Workflow expectations
 

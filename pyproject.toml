@@ -48,6 +48,11 @@ dev = [
 recall = "recall.cli:main"
 recall-mcp = "recall.server:main"
 
+[project.urls]
+Homepage = "https://github.com/tarun-ks/recall-mcp"
+Repository = "https://github.com/tarun-ks/recall-mcp"
+Issues = "https://github.com/tarun-ks/recall-mcp/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

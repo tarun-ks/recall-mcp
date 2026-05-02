@@ -33,6 +33,38 @@ def db(tmp_path: Path) -> sqlite3.Connection:
 # === Connect / migrate / version ===
 
 
+def test_connect_uses_env_override_when_no_explicit_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RECALL_DB_PATH overrides the built-in default when no path arg given."""
+    target = tmp_path / "from_env.sqlite"
+    monkeypatch.setenv("RECALL_DB_PATH", str(target))
+    conn = connect()
+    migrate(conn)
+    assert target.exists()
+
+
+def test_connect_explicit_arg_wins_over_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit path arg beats RECALL_DB_PATH (resolution order: arg > env > default)."""
+    monkeypatch.setenv("RECALL_DB_PATH", str(tmp_path / "from_env.sqlite"))
+    explicit = tmp_path / "from_arg.sqlite"
+    conn = connect(explicit)
+    migrate(conn)
+    assert explicit.exists()
+    assert not (tmp_path / "from_env.sqlite").exists()
+
+
+def test_connect_env_path_expands_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``~`` in RECALL_DB_PATH must be expanded relative to $HOME."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("RECALL_DB_PATH", "~/custom/recall.sqlite")
+    conn = connect()
+    migrate(conn)
+    assert (tmp_path / "custom" / "recall.sqlite").exists()
+
+
 def test_connect_loads_sqlite_vec(tmp_path: Path) -> None:
     conn = connect(tmp_path / "vec.sqlite")
     row = conn.execute("SELECT vec_version()").fetchone()

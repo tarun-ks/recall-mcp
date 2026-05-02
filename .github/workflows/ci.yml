@@ -54,7 +54,10 @@ jobs:
       - name: sync deps
         run: uv sync --python 3.12
       - name: pytest (embed only)
-        run: uv run --python 3.12 pytest -m embed
+        run: |
+          # Tolerate exit 5 (no tests collected) until Phase 2 lands @pytest.mark.embed tests.
+          # REMOVE THIS once tests/test_embed.py exists with at least one @pytest.mark.embed test.
+          uv run --python 3.12 pytest -m embed || (rc=$?; [ $rc -eq 5 ] && echo "no embed tests yet (Phase 2 will populate)" || exit $rc)
 
   scrub-canary:
     name: scrubber test count canary

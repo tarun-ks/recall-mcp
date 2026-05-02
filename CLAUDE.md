@@ -340,6 +340,27 @@ don't get lost in chat history.
   build if any line lacks `FAKEFAKE` would protect against a future PR
   adding a new pattern with realistic-shape synthetic data and re-tripping
   GitHub's secret scanner. Address whenever CI is next touched.
+- **Remove embed-lane exit-5 tolerance from `ci.yml`** — Phase 2 task,
+  tied to the first `@pytest.mark.embed` test landing. The current
+  workflow has a `REMOVE THIS once tests/test_embed.py exists with at
+  least one @pytest.mark.embed test` comment around a shell-level
+  `[ $rc -eq 5 ]` allowance. Once Phase 2 ships an actual embed test,
+  the marker matches something, exit 5 disappears, and the tolerance
+  becomes dead weight. Grep for `REMOVE THIS once` to find the line.
+- **Bump GitHub Actions to Node 24 versions** — medium-priority CI
+  cleanup, deadline 2026-06-02. `actions/checkout`, `astral-sh/setup-uv`,
+  and `actions/cache` are running on Node.js 20, which GitHub deprecates
+  in favor of Node 24 on June 2, 2026. Two paths: bump action major
+  versions when newer ones release with Node 24 support, or opt in
+  early via `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` in the workflow
+  env block. Don't ignore — full Node 20 removal is 2026-09-16.
+
+The four CI-related deferred items above (`[dev]` dep-list sync check,
+canonical sentinel check, embed-lane exit-5 tolerance removal, and the
+Node 24 bump) collectively form a **CI cleanup pass** — batch them as
+a single set of changes at end of Phase 2 rather than addressing one
+at a time. Single PR, single review, single CI run to verify the whole
+pass; less context-switching.
 
 ## End-of-Phase-1 checklist
 
@@ -356,11 +377,6 @@ Phase 2 work:
       before merging anything else.**
 - [ ] File deferred items as GitHub issues (see "Deferred items"). Tag
       the scrubber-coverage gap as `v1-launch-blocker`.
-- [ ] Decide on Python 3.13 autocommit semantics: the CI fast lane
-      includes 3.13, and `db.transaction()` relies on legacy
-      `isolation_level=None` autocommit behavior. If 3.13 breaks on first
-      remote run, switch the connection to `autocommit=True` (small fix);
-      if green, no action needed.
 - [ ] README skeleton update is a Phase 4 deliverable, but the GitHub
       repo's first impression matters — at minimum, mark "Status:
       pre-alpha, Phase 1 complete" in the readme on first push so

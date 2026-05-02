@@ -273,6 +273,27 @@ When a real composition bug is caught mid-suite, the handoff report MUST
 name the root cause + fix + an inline-comment-for-future-contributors
 (so the next session sees the trap before re-stepping in it).
 
+## Architectural seams
+
+**source → indexer (streaming OK) → embedder (must batch) → DB write (per-batch).**
+
+Atuin reader streams via cursor, so a million-row atuin DB doesn't blow up
+memory. Good. But the embedding step in Phase 2 can't stream — it batches.
+Worth knowing the architectural seam: source → indexer (streaming OK) →
+embedder (must batch) → DB write (per-batch).
+
+When designing Phase 2 (Commits 2.5–2.8), respect this seam: don't
+accidentally collapse it. Specifically:
+
+- Don't `list(source.iter_entries())` upfront — sources are streaming for
+  a reason; eagerly materializing kills the memory advantage on large
+  atuin DBs.
+- Don't embed one entry at a time — sentence-transformers wants batches
+  (typically 32–64) for throughput; the per-call overhead dominates
+  otherwise. That's the throughput cliff.
+- Do batch DB writes per embedding batch — one transaction per N rows
+  amortizes commit cost while keeping memory bounded.
+
 ## Deferred items (file as GitHub issues at end of Phase 1)
 
 These were called out and intentionally deferred. File them as GitHub
@@ -286,6 +307,39 @@ don't get lost in chat history.
   GCP service-account JSON inline, `~/.netrc` / `~/.pgpass` references,
   generic `password:` (colon, no `=`), base64-encoded secrets pasted as
   positional args.
+- **Bash multi-line limitation** — low-priority docs. A bash command
+  spanning multiple physical lines emits as separate `Entry`s. Document
+  in the README (Phase 4). Bash history doesn't preserve enough context
+  to disambiguate reliably.
+- **Pydantic vs dataclass perf decision** — defer until Phase 2 perf
+  tests trigger. `Entry` is a Pydantic v2 model; ~100 µs per build is
+  plausible. At 50k entries that's ~5s of pure validation. If the
+  `< 60s for 50k index` perf gate fails and pydantic is hot, switch to
+  `dataclass(slots=True)` (faster, loses validation) or
+  `ConfigDict(validate_default=False)` (cheaper, keeps validation).
+- **`RECALL_DB_PATH` user documentation** — Phase 2 todo. The env
+  override exists in `db.py` (resolution: arg > env > `~/.recall/
+  db.sqlite`) and has tests, but no user-facing surface yet. The
+  eventual `recall index` CLI help, README install section, and CLI
+  reference need a one-liner each.
+- **`[dev]` dep-list sync CI check** — low-priority CI hygiene. Dev
+  deps are mirrored across `[project.optional-dependencies].dev` and
+  `[dependency-groups].dev` in `pyproject.toml` to support both
+  `pip install -e ".[dev]"` and `uv sync`. A 5-line CI script that
+  parses `pyproject.toml`, asserts the two dev sets are identical, and
+  fails the build on divergence would protect against silent drift in
+  PRs that update only one. Comments in `pyproject.toml` warn careful
+  readers; this guards against the rest. Address whenever CI is next
+  touched.
+- **Canonical sentinel CI check** — low-priority CI hygiene, same tier
+  as the dep-list sync check. The scrubber fixture
+  (`tests/fixtures/secrets_corpus.txt`) uses the canonical sentinel
+  `FAKEFAKE` so synthetic tokens cannot match real-world secret patterns
+  (per the workflow rule in §"Workflow expectations"). A 5-line CI
+  script that scans every non-comment line of the corpus and fails the
+  build if any line lacks `FAKEFAKE` would protect against a future PR
+  adding a new pattern with realistic-shape synthetic data and re-tripping
+  GitHub's secret scanner. Address whenever CI is next touched.
 
 ## End-of-Phase-1 checklist
 

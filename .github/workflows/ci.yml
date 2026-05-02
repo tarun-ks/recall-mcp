@@ -1,0 +1,117 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    name: fast (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: install python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: sync deps
+        run: uv sync --python ${{ matrix.python-version }}
+      - name: ruff lint
+        run: uv run --python ${{ matrix.python-version }} ruff check .
+      - name: ruff format check
+        run: uv run --python ${{ matrix.python-version }} ruff format --check .
+      - name: mypy
+        run: uv run --python ${{ matrix.python-version }} mypy src
+      - name: pytest (no embed)
+        run: uv run --python ${{ matrix.python-version }} pytest -m "not embed"
+
+  embed:
+    name: embed (ubuntu / py3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: install python 3.12
+        run: uv python install 3.12
+      - name: cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-bge-small-en-v1.5
+      - name: sync deps
+        run: uv sync --python 3.12
+      - name: pytest (embed only)
+        run: uv run --python 3.12 pytest -m embed
+
+  scrub-canary:
+    name: scrubber test count canary
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: detect scrub-touching PR
+        id: touched
+        run: |
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD \
+              | grep -E '^(src/recall/scrub\.py|tests/test_scrub\.py)$' >/dev/null; then
+            echo "touched=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "touched=0" >> "$GITHUB_OUTPUT"
+            echo "scrub.py / test_scrub.py not touched; skipping canary."
+          fi
+      - uses: astral-sh/setup-uv@v3
+        if: steps.touched.outputs.touched == '1'
+        with:
+          enable-cache: true
+      - name: sync deps
+        if: steps.touched.outputs.touched == '1'
+        run: uv sync
+      - name: count head scrub tests
+        if: steps.touched.outputs.touched == '1'
+        id: head
+        run: |
+          if [ -f tests/test_scrub.py ]; then
+            count=$(uv run pytest --collect-only -q tests/test_scrub.py 2>/dev/null | grep -c '::' || true)
+          else
+            count=0
+          fi
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+      - name: count base scrub tests
+        if: steps.touched.outputs.touched == '1'
+        id: base
+        run: |
+          git stash push -- tests/test_scrub.py src/recall/scrub.py 2>/dev/null || true
+          git checkout origin/${{ github.base_ref }} -- tests/test_scrub.py src/recall/scrub.py 2>/dev/null || true
+          if [ -f tests/test_scrub.py ]; then
+            count=$(uv run pytest --collect-only -q tests/test_scrub.py 2>/dev/null | grep -c '::' || true)
+          else
+            count=0
+          fi
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          git checkout HEAD -- tests/test_scrub.py src/recall/scrub.py 2>/dev/null || true
+          git stash pop 2>/dev/null || true
+      - name: assert non-decreasing
+        if: steps.touched.outputs.touched == '1'
+        run: |
+          head=${{ steps.head.outputs.count }}
+          base=${{ steps.base.outputs.count }}
+          echo "scrub test count: base=$base, head=$head"
+          if [ "$head" -lt "$base" ]; then
+            echo "::error::scrub test count decreased ($base -> $head). PRs touching scrub must not remove coverage."
+            exit 1
+          fi

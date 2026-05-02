@@ -1,0 +1,36 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+.eggs/
+
+# uv / virtualenv
+.venv/
+venv/
+env/
+
+# Test, type, lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# IDE / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Project-local data (lives under $HOME, but ignore here in case anyone symlinks)
+.recall/
+recall.log

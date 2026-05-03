@@ -1,0 +1,23 @@
+[
+  {
+    "commit_sha": "2a83df351cce3df0574292937d70f432b90d60c5",
+    "timestamp": "2026-05-03T12:55:52+00:00",
+    "dataset": "nl2bash",
+    "recall_at_1": 0.28930207966161436,
+    "recall_at_5": 0.44862530842439197,
+    "mrr": 0.3507152508518388,
+    "runtime_seconds": 24.94,
+    "runtime_breakdown": {
+      "model_load": 5.34,
+      "corpus_embed": 5.79,
+      "index_build": 0.16,
+      "query_embed": 4.6,
+      "search": 9.04
+    },
+    "model_name": "BAAI/bge-small-en-v1.5",
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  }
+]

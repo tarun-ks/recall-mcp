@@ -1,0 +1,20 @@
+# Dogfood eval dataset — real (NL-question, expected-command) pairs from
+# tarun's actual zsh history. Used alongside nl2bash to catch cases
+# where public benchmark numbers don't reflect real-use quality.
+#
+# This file is a stub; the dogfood query set lands in a follow-up commit
+# (`feat(eval): add dogfood query set from real shell history`) once the
+# queries have been curated. Until that commit, the harness skips dogfood
+# eval if this file has no `[[query]]` entries.
+#
+# Schema (when populated):
+#
+#   [[query]]
+#   nl = "natural-language description"
+#   gold = "exact command from shell history"
+#
+#   [[query]]
+#   nl = "..."
+#   gold = "..."
+#   # multiple gold commands (multi-reference) supported via array form:
+#   # gold = ["cmd one", "cmd two"]

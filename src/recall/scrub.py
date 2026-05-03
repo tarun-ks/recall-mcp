@@ -6,6 +6,10 @@ with ``<REDACTED:KIND>`` markers and is idempotent: ``scrub(scrub(s)) == scrub(s
 
 Pattern coverage and entropy rules: see CLAUDE.md, "Critical correctness
 requirements" section 1.
+
+Test fixtures embed the canonical sentinel ``FAKEFAKE`` so synthetic
+tokens cannot match real-world secret patterns; see CLAUDE.md
+"Workflow expectations" for the rule.
 """
 
 from __future__ import annotations

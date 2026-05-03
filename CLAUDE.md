@@ -122,7 +122,40 @@ On startup, refuse queries if the configured model differs from the indexed
 one — prompt the user to run `recall index --rebuild`. Mixing embeddings
 across models silently produces garbage results.
 
-### 4a. Dedup salt and rebuild policy
+### 4a. Embedder public API contract
+
+`src/recall/embed.py`'s public surface is **frozen at Commit 2.5**. The 2.7
+"production-grade" rewrite changes internals only — caching, batching, the
+streaming/batching seam from "Architectural seams" — under the same
+public interface. Eval numbers must match within **±0.01 recall@5 noise
+band**, which is the contract that makes "behavior-preserving rewrite"
+testable rather than vibes.
+
+Frozen public surface:
+
+```python
+class Embedder:
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-small-en-v1.5",
+        model_revision: str | None = None,
+        cache_folder: Path | None = None,
+    ) -> None: ...
+
+    def encode(self, texts: Sequence[str]) -> np.ndarray:
+        # shape (len(texts), dim); float32; L2-normalized
+        ...
+
+    dim: int                         # read-only after __init__
+    model_name: str                  # the id passed at construction
+    model_revision: str | None       # pinned revision, or None
+```
+
+Anything else (private methods `_*`, internal caching, batching strategy,
+device selection) is implementation detail and may change in 2.7. Tests
+that lock down behavior should test the public surface only.
+
+### 4b. Dedup salt and rebuild policy
 
 The dedup hash is `BLAKE2b(salt ‖ raw_text)`, output 32 bytes, stored as
 `commands.text_hash`. The salt lives in `meta.dedup_salt` (hex), with
@@ -174,14 +207,44 @@ for orchestrating "clear → rotate → re-index." Mechanism vs. policy.
 - Cold start (model load + db open): < 2 s on M-series Mac
 - Single semantic query over 50k commands: < 100 ms p95
 - Initial index of 50k commands: < 60 s
+- Eval harness (`recall eval --dataset nl2bash`): ≤ 60 s on M-series Mac
+  (target). Soft warning printed at 90 s; hard fail (raised by the harness
+  itself, not just CI) at 120 s. The hard fail makes the runtime gate live
+  in the harness, so an accidental 10× slowdown trips the discipline before
+  CI even sees it.
 
 Tests live at `tests/test_perf.py`.
 
 ### 7. Eval harness must run
 
 `recall eval --dataset nl2bash` builds a fresh in-memory index from nl2bash
-commands, runs all NL queries, reports recall@1, recall@5, MRR. Target:
-recall@5 > 0.75 vs substring's ~0.2. These numbers ship in the README.
+commands, runs all NL queries, reports recall@1, recall@5, MRR.
+
+**Calibrated baseline (Commit 2.5, bge-small-en-v1.5):**
+
+| metric | value |
+| --- | --- |
+| recall@1 | 0.29 |
+| recall@5 | 0.45 |
+| MRR | 0.35 |
+| random-baseline recall@5 | 0.0005 |
+
+The recall@5 = 0.45 number is the empirical baseline, not an aspirational
+target. The original brief wrote "recall@5 > 0.75" — that was aspirational
+language; bge-small at default settings lands at 0.45 on `nl2bash`.
+
+**Headline pitch is delta-vs-substring, not absolute recall@5.** The
+substring baseline (Commit 2.6, same harness) is the comparison point.
+Decision tree for v1 model choice:
+
+| substring → semantic delta on nl2bash | action |
+| --- | --- |
+| ≥ 2× (e.g. substring 0.10 → semantic 0.45) | bge-small ships in v1; the delta is the value-prop |
+| < 2× | evaluate larger embedding models (bge-large, gte-large, etc.) before v1 launch; weigh size vs quality |
+
+These numbers ship in the README at v1, alongside the substring delta —
+the absolute recall@5 alone is uninterpretable to a drive-by visitor; the
+delta tells the value story.
 
 ## MCP tool surface (locked signatures)
 
@@ -212,11 +275,20 @@ Stop at the end of each commit/phase and show progress before continuing.
 - 1.3 DB schema, migrations, sqlite-vec wiring
 - 1.4 Source readers: zsh, bash, atuin (fish deferred)
 
-**Phase 2 — core retrieval**
-- 2.5 Embedding wrapper, model caching, batch encoding
-- 2.6 Hybrid search (vector + lexical, RRF k=60)
-- 2.7 `recall index` CLI (full + incremental)
-- 2.8 `recall eval` against nl2bash; report numbers
+**Phase 2 — core retrieval** *(reordered from original brief: eval moves to 2.5
+because the project's value proposition is a probabilistic claim, and three
+commits of optimization on an unverified premise is three commits in an
+arbitrary direction — see "Phase 2 gating rules" below)*
+- 2.5 **Eval harness + minimal `embed.py`** (sets the measuring stick;
+      produces the first real recall@k numbers on `nl2bash`)
+- 2.6 Substring-grep baseline in the same harness; the delta vs 2.5 is the
+      value-proposition expressed as a number
+- 2.7 `embed.py` production-grade — caching, batching, the streaming/
+      batching seam. **Behavior-preserving rewrite** (eval numbers must
+      match within ±0.01 recall@5 noise band)
+- 2.8 Indexer: `HistorySource` → scrubber → embedder → DB write,
+      respecting the architectural seam
+- 2.9 Hybrid search (vector + FTS5 with RRF k=60)
 
 **Phase 3 — MCP surface**
 - 3.9  `server.py` + `tools.py` with the six tools
@@ -242,9 +314,50 @@ uv run ruff format --check .     # CI: format check only
 uv run mypy src                  # strict type check
 ```
 
+## Phase 2 gating rules
+
+Phase 2 ships retrieval — a probabilistic system. Phase 1's binary tests-
+pass discipline is necessary but not sufficient: code can be correct in
+every unit test and still ship a regression in retrieval quality. Add a
+probabilistic gate alongside.
+
+**Every commit that touches retrieval logic must report:**
+1. Current `recall@5` on each eval dataset (`nl2bash`, eventually `dogfood`).
+2. Delta vs the prior commit's number (`recall@5 = 0.78 (was 0.76, +0.02)`).
+3. The number lives in three places:
+   - **Commit message** — headline, single line, at-a-glance history
+   - **`eval/results.json`** — append-only history of every run; one record
+     per `recall eval` invocation, keyed by `commit_sha + dataset`. Schema
+     per record: `{commit_sha, timestamp, dataset, recall_at_1, recall_at_5,
+     mrr, runtime_seconds, runtime_breakdown, model_name, model_revision,
+     random_baseline_recall_at_5, n_queries, n_corpus}`. Longitudinal view
+     beats single snapshot for spotting drift later.
+   - **CI logs** — the embed lane runs `recall eval` on every PR; the
+     regression gate (`.github/scripts/check_eval_regression.py`) compares
+     PR's just-computed number against `origin/main:eval/results.json`'s
+     most recent record for the same dataset. **PR fails if recall@5
+     dropped by more than the noise band (±0.01).**
+
+**Noise band.** `±0.01 recall@5`. This is what makes both the
+"behavior-preserving rewrite" of `embed.py` (2.5→2.7) testable AND the
+regression gate enforceable. Tighter would be flaky; looser would let real
+regressions through.
+
+**Probabilistic ≠ unrigorous.** Build the measuring stick before the things
+being measured. Iterating optimization commits without an eval harness is
+iterating blind; you discover at the end whether the project has any
+reason to exist. Eval first, then optimize against it.
+
+**Dogfood vs benchmark.** `nl2bash` provides public-benchmark credibility
+(numbers comparable to published results). The dogfood set (real queries
+from tarun's actual zsh history, lands in a follow-up commit) provides
+real-use-quality evidence. Both numbers must move together for the project
+to be worth shipping; one without the other is a partial picture.
+
 ## Composition is where bugs live
 
-Two consecutive commits (1.2 and 1.3) found bugs of identical shape:
+Recurring pattern across this project — primitives correct in isolation,
+broken at the boundary. Named instances:
 
 - **1.2 — `URL_USERINFO` vs `<REDACTED:GITHUB_TOKEN>`.** The userinfo
   regex was correct in isolation. After `GITHUB_TOKEN` had run, it met
@@ -258,8 +371,32 @@ Two consecutive commits (1.2 and 1.3) found bugs of identical shape:
   open transaction for `transaction()`'s explicit COMMIT — every test
   using the migrated DB exploded with `cannot commit - no transaction is
   active`. Fix: don't wrap.
-
-**Pattern:** primitives correct in isolation, broken at the boundary.
+- **2.5 — Typer single-command auto-collapse.** A `typer.Typer` app with
+  exactly one `@app.command(...)` registered treats that command as the
+  default — `recall eval --dataset nl2bash` then fails with
+  `unexpected extra argument (eval)` because typer never expected a
+  subcommand name. The bug was caught by *running the actual CLI*, not
+  by import-time tests. **Lesson: imports passing ≠ behavior correct.
+  Framework behavior can change based on registration count, plugin
+  presence, or env state. Integration runs (actually invoking the
+  CLI/server) catch what import-time tests miss.** Fix: register stub
+  commands for `index` (2.8) and `serve` (Phase 3) so typer always sees
+  ≥ 2 commands and never collapses.
+- **2.5 — Lazy-import test-collection cost.** A top-level
+  `from sentence_transformers import SentenceTransformer` in
+  `src/recall/embed.py` made `pytest -k scrub` (the canary) go from
+  ~50 ms to ~30 s — pytest's collection imports every `tests/test_*.py`
+  file, including `test_eval.py`, which transitively pulled torch
+  (~25 s of import overhead). No test ever ran torch; the import alone
+  destroyed scrub-canary's value. **Lesson: test collection time is a
+  project asset. The scrub canary's value depends on sub-second runtime;
+  a top-level torch import in any `tests/test_*.py` file silently
+  destroys that even if no test ever runs torch. New deps imported
+  during pytest collection must not exceed a budget — suggest scrub
+  canary + smoke ≤ 1s total. Lazy-import any heavy ML deps via
+  `if TYPE_CHECKING:` for type hints + in-method imports for runtime.**
+  Fix: move `SentenceTransformer` import inside `Embedder.__init__`,
+  use `if TYPE_CHECKING:` for annotations.
 
 **Discipline:** when introducing a new primitive that interacts with
 existing ones, write the *composition test first*. Don't trust that the
@@ -272,6 +409,49 @@ the design probably has the wrong split.
 When a real composition bug is caught mid-suite, the handoff report MUST
 name the root cause + fix + an inline-comment-for-future-contributors
 (so the next session sees the trap before re-stepping in it).
+
+## Eval harness
+
+`src/recall/eval/` houses the harness. CLI:
+
+```bash
+recall eval --dataset nl2bash               # appends to eval/results.json
+recall eval --dataset nl2bash --no-append   # prints only; doesn't touch history
+recall eval --dataset nl2bash --output PATH # custom history file (CI uses /tmp)
+```
+
+**Datasets:** `nl2bash` is shipped at 2.5. The dogfood dataset (real
+zsh-history queries) lands in a follow-up commit; until then,
+`eval/dogfood.toml` is a stub.
+
+**What it does.** Builds an in-memory `:memory:` SQLite + `sqlite-vec`
+index from the dataset's corpus, embeds every NL query, runs vector KNN
+search per query, computes recall@1 / recall@5 / MRR with **multi-
+reference semantics** ("any gold-reference command in top k counts as a
+hit"). Reports a runtime breakdown — `model_load`, `corpus_embed`,
+`index_build`, `query_embed`, `search`, `total` — so the first-run
+(includes ~120 MB model download) vs cached-run distinction is legible
+in output, not buried in a single 60s number. Also prints the random
+baseline (`avg_gold * k_max / n_corpus`) so the absolute recall@5 number's
+magnitude is interpretable for anyone reading the README.
+
+**Runtime gates** (in the harness itself, not just CI):
+- target ≤ 60 s on M-series Mac
+- soft warning at 90 s (printed by CLI)
+- hard fail at 120 s (`EvalRuntimeError` raised by the runner)
+
+The hard fail in the harness means an accidental 10× slowdown trips the
+discipline before CI even sees it.
+
+**`RECALL_EVAL_HARD_FAIL_S` env override** is for CI specifically, NOT
+for raising the local discipline ceiling. GitHub-hosted Linux runners
+are ~7× slower than M-series Mac for embedding (CPU vs MPS); empirical
+wall-clock on a fresh runner is ~255 s vs ~25 s locally. CI sets
+`RECALL_EVAL_HARD_FAIL_S=360` in the workflow env to absorb the
+runner-class delta without softening the 120 s local gate. If you find
+yourself wanting to raise the local ceiling, that's a signal something
+else is wrong (a regression, a bigger model, etc.) — investigate before
+adjusting.
 
 ## Architectural seams
 

@@ -41,6 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # regression gate needs git history for origin/main lookup
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
@@ -51,13 +53,27 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: hf-${{ runner.os }}-bge-small-en-v1.5
+      - name: cache nl2bash dataset
+        uses: actions/cache@v4
+        with:
+          path: ~/.recall/datasets/nl2bash
+          key: nl2bash-v1
       - name: sync deps
         run: uv sync --python 3.12
       - name: pytest (embed only)
-        run: |
-          # Tolerate exit 5 (no tests collected) until Phase 2 lands @pytest.mark.embed tests.
-          # REMOVE THIS once tests/test_embed.py exists with at least one @pytest.mark.embed test.
-          uv run --python 3.12 pytest -m embed || (rc=$?; [ $rc -eq 5 ] && echo "no embed tests yet (Phase 2 will populate)" || exit $rc)
+        run: uv run --python 3.12 pytest -m embed
+      - name: recall eval (nl2bash)
+        # GitHub-hosted Linux is ~7× slower than M-series Mac for embedding
+        # work (CPU vs MPS). Empirical wall-clock: ~255s on a fresh runner.
+        # Local dev stays at the 120s default; the harness's hard-fail gate
+        # still trips locally if a 10× regression lands. See CLAUDE.md
+        # "Eval harness" + runner.py for the env-var contract.
+        env:
+          RECALL_EVAL_HARD_FAIL_S: "360"
+        run: uv run --python 3.12 recall eval --dataset nl2bash --output /tmp/ci_eval.json
+      - name: regression gate (PR only)
+        if: github.event_name == 'pull_request'
+        run: uv run --python 3.12 python .github/scripts/check_eval_regression.py /tmp/ci_eval.json
 
   scrub-canary:
     name: scrubber test count canary

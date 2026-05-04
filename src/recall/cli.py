@@ -24,8 +24,10 @@ from typing import Annotated, Any
 
 import typer
 
+from recall.eval.dogfood import DogfoodDataset, DogfoodQueryMeta
 from recall.eval.nl2bash import Nl2BashDataset
 from recall.eval.runner import (
+    Dataset,
     EvalResult,
     EvalRuntimeError,
     run_eval,
@@ -66,6 +68,16 @@ _DEFAULT_RANKER_ORDER: tuple[str, ...] = (
     "bm25",
     "fuzzy",
 )
+
+# Dataset registry. The ``all`` option resolves to (nl2bash, dogfood) — both
+# numbers must move together for the project's value-prop to be defensible
+# (CLAUDE.md "Phase 2 gating rules"). Dogfood lazily-loads from disk
+# (eval/dogfood.toml) so a missing/malformed file is a clear single error.
+_DATASET_FACTORIES: dict[str, Callable[[], Dataset]] = {
+    "nl2bash": Nl2BashDataset,
+    "dogfood": DogfoodDataset,
+}
+_DEFAULT_DATASET_ORDER: tuple[str, ...] = ("nl2bash", "dogfood")
 
 
 def _git_head_sha() -> str:
@@ -155,8 +167,138 @@ def _resolve_rankers(name: str) -> tuple[str, ...]:
     return (name,)
 
 
+def _resolve_datasets(name: str) -> tuple[str, ...]:
+    if name == "all":
+        return _DEFAULT_DATASET_ORDER
+    if name not in _DATASET_FACTORIES:
+        valid = ", ".join(["all", *sorted(_DATASET_FACTORIES.keys())])
+        typer.secho(
+            f"unknown dataset: {name!r}; expected one of {valid}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+    return (name,)
+
+
+def _print_dogfood_per_query(
+    queries: Sequence[DogfoodQueryMeta],
+    results: Sequence[EvalResult],
+) -> None:
+    """Per-query inline format for dogfood: semantic vs best-lexical comparison.
+
+    The format is the headline data point — with a 5-query existence test,
+    aggregate recall@5 is signal but per-query pass/fail is the actual
+    evidence. Locked at 2.6.5 in CLAUDE.md "Phase 2 gating rules" via
+    the dogfood-specific comparison-table requirement.
+
+    Output shape (semantic + bm25 both available):
+
+        === Dogfood (5 queries, semantic vs best lexical) ===
+        [L] #42 grep useAgent           : semantic PASS@1   bm25 PASS@1   tie
+        [M] #19 webhook-platform deploy : semantic PASS@2   bm25 PASS@4   semantic-wins
+        [H] #52 mwbe                    : semantic PASS@4   bm25 FAIL     semantic-only ★
+        [H] #71 processed contracts     : semantic FAIL     bm25 FAIL     both-fail
+
+        semantic recall@5: 4/5  bm25 recall@5: 3/5
+        semantic-only wins: 1 (#52, the domain-knowledge test)
+
+    If only semantic ran (no bm25 in results), prints semantic-only rows
+    without the comparison verdict — the inline format still adds value
+    over aggregate metrics for a 5-query set, just less than with both.
+    """
+    sem = next((r for r in results if r.ranker == "semantic"), None)
+    bm25 = next((r for r in results if r.ranker == "bm25"), None)
+    if sem is None and bm25 is None:
+        # Neither comparison ranker ran; skip the inline format.
+        return
+
+    typer.echo("")
+    if sem is not None and bm25 is not None:
+        typer.echo("=== Dogfood (5 queries, semantic vs best lexical) ===")
+    else:
+        present = "semantic" if sem is not None else "bm25"
+        typer.echo(f"=== Dogfood (5 queries, {present} only) ===")
+
+    def fmt_rank(r: EvalResult | None, idx: int) -> str:
+        if r is None:
+            return "-"
+        rank = r.per_query_ranks[idx]
+        return f"PASS@{rank}" if rank is not None and rank <= 5 else "FAIL"
+
+    def verdict(s: str | None, b: str | None) -> str:
+        # Pre-condition: both s and b are non-None (caller guards on sem+bm25).
+        if s == "FAIL" and b == "FAIL":
+            return "both-fail"
+        if s == "FAIL":
+            return "bm25-only"
+        if b == "FAIL":
+            return "semantic-only"
+        # Both PASS@N — compare ranks (s/b are PASS@N strings; parse N).
+        sn = int(s.split("@")[1]) if s else 0
+        bn = int(b.split("@")[1]) if b else 0
+        if sn == bn:
+            return "tie"
+        return "semantic-wins" if sn < bn else "bm25-wins"
+
+    # ★ marker shown next to short label, always (regardless of verdict) — so a
+    # reader can always find the headline query in the table even when its
+    # row isn't a semantic-only win. (The 2.6.5 actual data has #52 fail on
+    # both rankers — the value-prop holds via #19, #48, #71 — and the star
+    # is still useful for spotting which row the design centered on.)
+    def short_label(q: DogfoodQueryMeta) -> str:
+        return f"{q.short} ★" if q.star else q.short
+
+    semantic_only_ids: list[int] = []
+    starred_ids: list[int] = []
+    for idx, q in enumerate(queries):
+        s = fmt_rank(sem, idx)
+        b = fmt_rank(bm25, idx)
+        if q.star:
+            starred_ids.append(q.id)
+        v_text = ""
+        if sem is not None and bm25 is not None:
+            v = verdict(s, b)
+            if v == "semantic-only":
+                semantic_only_ids.append(q.id)
+            v_text = f"  {v}"
+        label = short_label(q)
+        if sem is not None and bm25 is not None:
+            typer.echo(f"  [{q.tier}] #{q.id:<2} {label:<28}: semantic {s:<8}  bm25 {b:<8}{v_text}")
+        elif sem is not None:
+            typer.echo(f"  [{q.tier}] #{q.id:<2} {label:<28}: semantic {s}")
+        else:
+            typer.echo(f"  [{q.tier}] #{q.id:<2} {label:<28}: bm25 {b}")
+
+    typer.echo("")
+    summary_parts = []
+    if sem is not None:
+        summary_parts.append(
+            f"semantic recall@5: {int(sem.recall_at_5 * sem.n_queries)}/{sem.n_queries}"
+        )
+    if bm25 is not None:
+        summary_parts.append(
+            f"bm25 recall@5: {int(bm25.recall_at_5 * bm25.n_queries)}/{bm25.n_queries}"
+        )
+    typer.echo("  " + "  ".join(summary_parts))
+
+    if sem is not None and bm25 is not None:
+        if semantic_only_ids:
+            id_list = ", ".join(f"#{i}" for i in semantic_only_ids)
+            note = f"semantic-only wins: {len(semantic_only_ids)} ({id_list})"
+            # If the starred query is among the semantic-only wins, call it
+            # out — that's the strongest possible dogfood headline.
+            if starred_ids and any(s in semantic_only_ids for s in starred_ids):
+                hits = [s for s in starred_ids if s in semantic_only_ids]
+                hit_str = ", ".join(f"#{i}" for i in hits)
+                note += f" — includes the domain-knowledge test ({hit_str} ★)"
+            typer.echo(f"  {note}")
+        else:
+            typer.echo("  semantic-only wins: 0")
+
+
 def _result_record(result: EvalResult, commit_sha: str, timestamp: str) -> dict[str, Any]:
-    return {
+    record: dict[str, Any] = {
         "commit_sha": commit_sha,
         "timestamp": timestamp,
         "dataset": result.dataset,
@@ -172,14 +314,24 @@ def _result_record(result: EvalResult, commit_sha: str, timestamp: str) -> dict[
         "n_queries": result.n_queries,
         "n_corpus": result.n_corpus,
     }
+    # Persist per-query ranks for dogfood only — the per-query PASS→FAIL
+    # regression detector (.github/scripts/check_eval_regression.py) needs
+    # this signal. Skipping nl2bash keeps the file ~10× smaller given its
+    # ~10k-query footprint vs dogfood's 5.
+    if result.dataset == "dogfood":
+        record["per_query_ranks"] = list(result.per_query_ranks)
+    return record
 
 
 @app.command(name="eval")
 def eval_cmd(
     dataset: Annotated[
         str,
-        typer.Option(help="Dataset name (only 'nl2bash' supported in this build)."),
-    ] = "nl2bash",
+        typer.Option(
+            help="Dataset to run: all | nl2bash | dogfood. Default 'all' runs both "
+            "(public benchmark + real-history dogfood per CLAUDE.md Phase 2 gating)."
+        ),
+    ] = "all",
     ranker: Annotated[
         str,
         typer.Option(
@@ -201,58 +353,68 @@ def eval_cmd(
 ) -> None:
     """Run the eval harness and report retrieval metrics.
 
-    Phase 2 cadence: every retrieval-touching commit must report all
-    five rankers' recall@5. ``--ranker all`` (default) does that in one
-    invocation; ``--ranker <name>`` is for iteration.
+    Phase 2 cadence: every retrieval-touching commit reports all five
+    rankers' recall@5 on both nl2bash (public benchmark) and dogfood
+    (real-history). ``--dataset all --ranker all`` (the defaults) does
+    that in one invocation; one record per (commit, dataset, ranker)
+    is appended to the history file.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
-    if dataset != "nl2bash":
-        typer.secho(
-            f"unknown dataset: {dataset!r}; only 'nl2bash' is supported in this build",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(2)
-
+    dataset_names = _resolve_datasets(dataset)
     ranker_names = _resolve_rankers(ranker)
 
-    ds = Nl2BashDataset()
-    typer.echo(f"Running eval on {ds.name}: {len(ds.corpus())} corpus / {len(ds.cases())} queries")
-    typer.echo(f"Rankers: {', '.join(ranker_names)}")
-
-    results: list[EvalResult] = []
+    all_results: list[EvalResult] = []
     overall_start = time.perf_counter()
-    for i, name in enumerate(ranker_names, start=1):
-        try:
-            result = run_eval(ds, _RANKER_FACTORIES[name])
-        except EvalRuntimeError as e:
-            typer.secho(
-                f"eval HARD-FAILED on runtime budget for {name!r}: {e}",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(1) from e
-        results.append(result)
-        _print_per_ranker(result, i, len(ranker_names))
-        # Cumulative-budget check: per-ranker hard fail is in runner.py
-        # (anomaly detector for any single ranker); this is the aggregate
-        # gate across the all-rankers loop, separately tunable.
-        cumulative = time.perf_counter() - overall_start
-        if cumulative > ALL_RANKERS_HARD_FAIL_S:
-            typer.secho(
-                f"cumulative all-ranker wall-clock {cumulative:.1f}s > "
-                f"{ALL_RANKERS_HARD_FAIL_S}s — aggregate hard runtime budget "
-                "exceeded. Override via RECALL_EVAL_ALL_HARD_FAIL_S env var "
-                "(CI sets 600s; local default 180s).",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(1)
+
+    for dsname in dataset_names:
+        ds = _DATASET_FACTORIES[dsname]()
+        typer.echo("")
+        typer.echo(
+            f"=== Running eval on {ds.name}: "
+            f"{len(ds.corpus())} corpus / {len(ds.cases())} queries ==="
+        )
+        typer.echo(f"Rankers: {', '.join(ranker_names)}")
+
+        ds_results: list[EvalResult] = []
+        ds_start = time.perf_counter()
+        for i, name in enumerate(ranker_names, start=1):
+            try:
+                result = run_eval(ds, _RANKER_FACTORIES[name])
+            except EvalRuntimeError as e:
+                typer.secho(
+                    f"eval HARD-FAILED on runtime budget for {name!r}: {e}",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                raise typer.Exit(1) from e
+            ds_results.append(result)
+            all_results.append(result)
+            _print_per_ranker(result, i, len(ranker_names))
+            # Cumulative-budget check across ALL datasets and rankers — the
+            # aggregate gate is wall-clock-since-start, not per-dataset, so
+            # a slow dogfood lane after a borderline-OK nl2bash lane still
+            # trips the budget.
+            cumulative = time.perf_counter() - overall_start
+            if cumulative > ALL_RANKERS_HARD_FAIL_S:
+                typer.secho(
+                    f"cumulative wall-clock {cumulative:.1f}s > "
+                    f"{ALL_RANKERS_HARD_FAIL_S}s — aggregate hard runtime budget "
+                    "exceeded. Override via RECALL_EVAL_ALL_HARD_FAIL_S env var "
+                    "(CI sets 600s; local default 180s).",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                raise typer.Exit(1)
+
+        ds_total = time.perf_counter() - ds_start
+        _print_summary(ds_results, ds_total)
+        # Dogfood-specific per-query inline format — the headline data
+        # point on a 5-query existence test (CLAUDE.md "Phase 2 gating").
+        if dsname == "dogfood" and isinstance(ds, DogfoodDataset):
+            _print_dogfood_per_query(ds.queries, ds_results)
 
     overall_total = time.perf_counter() - overall_start
-
-    _print_summary(results, overall_total)
 
     if overall_total > ALL_RANKERS_SOFT_WARN_S:
         typer.secho(
@@ -278,7 +440,7 @@ def eval_cmd(
             raise typer.Exit(2)
     sha = _git_head_sha()
     ts = datetime.now(UTC).isoformat(timespec="seconds")
-    new_records = [_result_record(r, sha, ts) for r in results]
+    new_records = [_result_record(r, sha, ts) for r in all_results]
     history.extend(new_records)
     output.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
     typer.echo("")

@@ -1,20 +1,169 @@
 # Dogfood eval dataset — real (NL-question, expected-command) pairs from
-# tarun's actual zsh history. Used alongside nl2bash to catch cases
-# where public benchmark numbers don't reflect real-use quality.
+# the project author's actual zsh + bash history, recorded 2026-05-04.
 #
-# This file is a stub; the dogfood query set lands in a follow-up commit
-# (`feat(eval): add dogfood query set from real shell history`) once the
-# queries have been curated. Until that commit, the harness skips dogfood
-# eval if this file has no `[[query]]` entries.
+# This is intentional dogfooding: the eval is performed against real shell
+# history of someone who would actually use the tool, not synthetic or
+# hand-curated data.
 #
-# Schema (when populated):
+# Source: zsh + bash history of the project's primary author (tarun-ks)
+# as of 2026-05-04.
 #
-#   [[query]]
-#   nl = "natural-language description"
-#   gold = "exact command from shell history"
+# Corpus: 56 unique entries (6 gold positions across 5 NL queries + 50
+# stratified distractors). Distractor sampling: uniform-stride-per-stratum
+# (indices floor((i+0.5)*N/n)) over a 307-candidate pool extracted from
+# zsh + bash history, after excluding gold variants, weak entries, and
+# entries the scrubber doesn't currently catch (see CLAUDE.md §1 dual
+# scrubber findings recorded with this commit). Per-category counts
+# (~16% rate, with small upward bumps on tiny strata for representation):
+#   containerization-bash: 3, cloud-auth: 5, database: 3, build-package: 2,
+#   file-processing: 8, git-non-trivial: 1, project-specific: 28.
 #
-#   [[query]]
-#   nl = "..."
-#   gold = "..."
-#   # multiple gold commands (multi-reference) supported via array form:
-#   # gold = ["cmd one", "cmd two"]
+# Sanitization applied to source history:
+#   hooksecure-platform → webhook-platform     (GCP project name; redundant suffix)
+#   hooksecure-X        → webhook-platform-X   (service / repo names)
+#   keycloak-hhsa       → auth-app-keycloak
+#   hhsa                → auth-app
+#   \d{6}-\d{6}-\d{6}  → XXXXXX-XXXXXX-XXXXXX  (billing IDs)
+#   nyc_procurment_public → preserved (intentional; public NYC PASSPort dataset)
+
+# corpus = 56 entries. Listed in: distractor stratum order, then golds.
+# Order is presentational only — the ranker permutes freely.
+corpus = [
+  "podman inspect auth-app-keycloak --format '{{.State.Status}}' 2>/dev/null || echo \"Container not found\"",
+  "podman ps -a --format \"{{.Names}} {{.Status}}\" | grep -E \"camunda|proxy\"",
+  "podman start auth-app-keycloak 2>&1 && echo \"✅ Keycloak-auth-app container started\"",
+  "gcloud services enable run.googleapis.com pubsub.googleapis.com artifactregistry.googleapis.com",
+  "gcloud projects get-iam-policy webhook-platform --format=json",
+  "gcloud version && gcloud config get-value core/project && gcloud auth list --format=\"value(account)\" --filter=\"status=ACTIVE\"",
+  '''gcloud services enable firebasehosting.googleapis.com --project webhook-platform && \
+firebase hosting:sites:create hook-platform-app --project webhook-platform''',
+  "gcloud auth list && firebase login",
+  "psql -U postgres -d nyc_procurment_public -c \"SELECT epin, status, release_date, due_date, LEFT(description, 50) as desc_snippet FROM rfp_metadata WHERE status IS NOT NULL AND description IS NOT NULL ORDER BY updated_at DESC LIMIT 10;\"",
+  "psql -U postgres -d nyc_procurment_public -c \"SELECT 'RFP Metadata' as table, count(*) FROM rfp_metadata UNION ALL SELECT 'Spending Data', count(*) FROM spending_data UNION ALL SELECT 'Contract Data', count(*) FROM contract_data_nyc_checkbook UNION ALL SELECT 'CROL Data', count(*) FROM crol_data;\" && ps -p 1318 && tail -n 5 ../procurement_data_ingestion/scraper_output.log && ls -1 ../spending_data | wc -l && ls -1 ../contract_data_nyc_checkbook | wc -l && ls -1 ../crol_data | wc -l",
+  "psql -U postgres -d nyc_procurment_public -c \"SELECT count(*) FROM spending_data;\" && psql -U postgres -d nyc_procurment_public -c \"SELECT min(fiscal_year), max(fiscal_year) FROM spending_data;\"",
+  "npm install @copilotkit/react-core @copilotkit/react-ui @copilotkit/runtime @copilotkit/shared lucide-react",
+  "pip install -r requirements.txt && uvicorn main:app --port 3003 & sleep 5 && python3 verify_cli_bridge.py",
+  "grep \"@copilotkit\" ../frontend/package.json && ./venv/bin/pip list | grep copilotkit",
+  "grep -rE \"300|10000\" . --exclude-dir=node_modules --exclude-dir=venv --exclude-dir=.next --exclude-dir=.git",
+  "grep -n \"Replays:\" frontend/app/dashboard/page.tsx",
+  "find . -name \"webhook_processor.py\"",
+  "grep -r \"webhook-platform\\.\" backend/app/",
+  "grep -n \"10,000\" app/dashboard/page.tsx",
+  "grep -n \"Pro\" app/dashboard/page.tsx",
+  "grep -c \"Upserted RFP:\" scraper_output.log && tail -n 20 scraper_output.log && psql -U postgres -d nyc_procurment_public -c \"SELECT count(*) FROM rfp_metadata;\"",
+  "git add backend/app/routes/ && git commit -m \"fix(standardization): exhaustive removal of webhook-platform schema prefix in routes\" && git push origin main",
+  "stripe listen --forward-to localhost:3001/api/billing/webhook",
+  "firebase apps:list --project webhook-platform",
+  "firebase deploy --only hosting --project webhook-platform --debug",
+  "firebase hosting:sites:list --project webhook-platform --non-interactive",
+  "npx create-next-app@latest ./ --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --use-npm --yes",
+  "curl -X POST http://localhost:8000/copilotkit/info -H \"Content-Type: application/json\" -d \"{}\"",
+  "./venv/bin/pip install google-adk google-cloud-aiplatform google-cloud-texttospeech moviepy",
+  "./venv/bin/pip install google-generativeai && ./venv/bin/pip list | grep google",
+  "./venv/bin/pip list | grep google-genai",
+  "curl -v -X POST http://localhost:8000/copilotkit/info -H \"Content-Type: application/json\" -d \"{}\"",
+  "./venv/bin/pip install \"starlette>=0.49.1\"",
+  "pg_isready -h localhost -p 5432",
+  "curl -I http://localhost:3001/health",
+  "killall uvicorn; sleep 2; uvicorn main:app --port 3003 & sleep 5 && python3 verify_cli_bridge.py",
+  "killall -9 uvicorn; find . -name \"__pycache__\" -type d -exec rm -rf {} +; sleep 2; uvicorn main:app --port 3003 & sleep 5 && python3 verify_cli_bridge.py",
+  "killall -9 uvicorn; find . -name \"__pycache__\" -type d -exec rm -rf {} +; sleep 2; uvicorn main:app --port 3009 & sleep 5 && python3 verify_cli_bridge.py",
+  "rm -rf cli/ && git add . && git commit -m \"fix: platform stabilization, retry schema fix, and CLI removal\" && git push origin main",
+  "lsof -ti:4000 | xargs kill -9",
+  "export DATABASE_URL=$(grep \"^DATABASE_URL=\" .env | cut -d '=' -f2-) && psql \"$DATABASE_URL\" -c \"SELECT id, plan, monthly_event_limit, monthly_replay_limit, monthly_test_event_limit FROM webhook-platform.customers WHERE plan = 'free' LIMIT 1;\"",
+  "export DATABASE_URL=$(grep \"^DATABASE_URL=\" .env | cut -d '=' -f2-) && psql \"$DATABASE_URL\" -c \"SELECT id, email, plan, monthly_event_limit, monthly_test_event_limit FROM webhook-platform.customers WHERE plan = 'pro';\"",
+  "source venv/bin/activate && python3 -c \"from openpyxl import load_workbook; wb = load_workbook('PASSPortPublic_Contract.xlsx', read_only=True, data_only=True); ws = wb.active; print([ws.cell(row=r, column=3).value for r in range(3, 10)])\"",
+  "python3 -c \"import pandas as pd; df = pd.read_csv('contracts_CT1s.csv'); print(df[df.duplicated(subset=['Prime Contract ID'], keep=False)]['Prime Contract ID'].head(1))\"",
+  "cp contracts_CT1s.csv use_cases/anomaly_detection/data/ && cp contracts_CT1s.csv use_cases/risk_prediction/data/ && cp feature_engineering.py use_cases/anomaly_detection/src/ && cp feature_engineering.py use_cases/risk_prediction/src/",
+  "mkdir -p spending_data_ingestion && cp .env spending_data_ingestion/",
+  "python3 ingest_sbs.py > sbs_output.log 2>&1 & echo $! > sbs.pid",
+  "mkdir -p contract_data_ingestion && cp .env contract_data_ingestion/",
+  "brew install --cask db-browser-for-sqlite",
+  "aws-azure-login --configure",
+  "grep -r \"useAgent\" frontend",
+  '''gcloud run deploy webhook-platform-ingestor \
+  --image us-central1-docker.pkg.dev/webhook-platform/webhook-platform-repo/backend:latest \
+  --command "uvicorn","ingest:app","--host","0.0.0.0","--port","8080" \
+  --env-vars-file .env.production \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --memory 128Mi \
+  --cpu 1 \
+  --min-instances 0 \
+  --max-instances 5 \
+  --set-env-vars GCP_PROJECT_ID=webhook-platform,PUBSUB_TOPIC_INGEST=webhooks-raw''',
+  '''gcloud run deploy webhook-platform-ingestor \
+  --image us-central1-docker.pkg.dev/webhook-platform/webhook-platform-repo/backend:latest \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars="GCP_PROJECT_ID=webhook-platform,PUBSUB_TOPIC_INGEST=webhooks-raw,App_ENV=production"''',
+  "grep -r \"NEXT_PUBLIC_API_URL\" .env*",
+  "grep -i \"mwbe\" anomaly_detection.py",
+  "python3 -c \"import pandas as pd; df=pd.read_csv('processed_contracts.csv', low_memory=False); overruns=df[df['has_cost_overrun']==1][['Prime Contract ID', 'Prime Vendor', 'Prime Contract Original Amount', 'Prime Contract Current Amount', 'amount_diff', 'percent_change']].head(3); print(overruns.to_string())\"",
+]
+
+# 5 NL queries. Field semantics:
+#   id    — query identifier (matches the eyeball-pass numbering used in
+#           the 2.6.5 review; preserved for traceability)
+#   tier  — paraphrase difficulty: "L" (NL shares ≥1 content token with
+#           the gold), "M" (related vocabulary, no shared content tokens),
+#           "H" (no overlap, fully abstracted intent)
+#   short — short label printed in the per-query inline output
+#   nl    — the NL query the ranker sees
+#   gold  — single gold command (string)
+#   golds — multi-reference golds (array). Use either gold or golds
+#           per query; arity signals via field name.
+#   star  — true marks the headline query (the domain-knowledge test)
+
+[[query]]
+id = 42
+tier = "L"
+short = "grep useAgent"
+nl = "find useAgent references in the frontend"
+gold = "grep -r \"useAgent\" frontend"
+
+[[query]]
+id = 19
+tier = "M"
+short = "webhook-platform deploy"
+nl = "push the latest build of the data-intake worker to managed cloud"
+golds = [
+  '''gcloud run deploy webhook-platform-ingestor \
+  --image us-central1-docker.pkg.dev/webhook-platform/webhook-platform-repo/backend:latest \
+  --command "uvicorn","ingest:app","--host","0.0.0.0","--port","8080" \
+  --env-vars-file .env.production \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --memory 128Mi \
+  --cpu 1 \
+  --min-instances 0 \
+  --max-instances 5 \
+  --set-env-vars GCP_PROJECT_ID=webhook-platform,PUBSUB_TOPIC_INGEST=webhooks-raw''',
+  '''gcloud run deploy webhook-platform-ingestor \
+  --image us-central1-docker.pkg.dev/webhook-platform/webhook-platform-repo/backend:latest \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars="GCP_PROJECT_ID=webhook-platform,PUBSUB_TOPIC_INGEST=webhooks-raw,App_ENV=production"''',
+]
+
+[[query]]
+id = 48
+tier = "M"
+short = "NEXT_PUBLIC_API_URL"
+nl = "where do we set the browser-visible backend address per environment file"
+gold = "grep -r \"NEXT_PUBLIC_API_URL\" .env*"
+
+[[query]]
+id = 52
+tier = "H"
+short = "mwbe"
+star = true
+nl = "see how we flag minority-vendor procurements"
+gold = "grep -i \"mwbe\" anomaly_detection.py"
+
+[[query]]
+id = 71
+tier = "H"
+short = "processed contracts"
+nl = "give me a fast summary of the procurement spending after my cleanup pass"
+gold = "python3 -c \"import pandas as pd; df=pd.read_csv('processed_contracts.csv', low_memory=False); overruns=df[df['has_cost_overrun']==1][['Prime Contract ID', 'Prime Vendor', 'Prime Contract Original Amount', 'Prime Contract Current Amount', 'amount_diff', 'percent_change']].head(3); print(overruns.to_string())\""

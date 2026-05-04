@@ -63,6 +63,14 @@ class EvalResult:
     model_name: str | None
     model_revision: str | None
     random_baseline_recall_at_5: float
+    # Per-query rank of the first gold-command match in the top-k results
+    # (1-indexed), or ``None`` if no gold appeared in top-k. Parallel to
+    # ``dataset.cases()`` order. Used by the CLI's per-query inline format
+    # (the dogfood path needs semantic vs bm25 per-query comparison) and by
+    # the regression gate's per-query PASS→FAIL detector. Aggregate metrics
+    # already encode this, but recovering per-query rank from aggregates is
+    # impossible — exposing it here keeps the runner's metrics canonical.
+    per_query_ranks: tuple[int | None, ...] = ()
 
 
 class Dataset(Protocol):
@@ -126,6 +134,7 @@ def run_eval(
     hits_at_1 = 0
     hits_at_5 = 0
     reciprocal_ranks: list[float] = []
+    per_query_ranks: list[int | None] = []
     total_gold = 0
 
     for case, top_ids in zip(cases, all_top_ids, strict=True):
@@ -139,6 +148,7 @@ def run_eval(
                 rank = r
                 break
 
+        per_query_ranks.append(rank)
         if rank is not None:
             if rank == 1:
                 hits_at_1 += 1
@@ -175,6 +185,7 @@ def run_eval(
         model_name=getattr(ranker, "model_name", None),
         model_revision=getattr(ranker, "model_revision", None),
         random_baseline_recall_at_5=random_baseline,
+        per_query_ranks=tuple(per_query_ranks),
     )
 
 

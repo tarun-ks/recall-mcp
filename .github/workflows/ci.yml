@@ -62,18 +62,21 @@ jobs:
         run: uv sync --python 3.12
       - name: pytest (embed only)
         run: uv run --python 3.12 pytest -m embed
-      - name: recall eval (nl2bash)
+      - name: recall eval (nl2bash + dogfood)
         # GitHub-hosted Linux is ~7x slower than M-series Mac for embedding
         # work (CPU vs MPS). Two separate budgets: per-ranker hard fail
         # (RECALL_EVAL_HARD_FAIL_S, set in runner.py) is the anomaly
         # detector for any single ranker; all-rankers cumulative
         # (RECALL_EVAL_ALL_HARD_FAIL_S) is the aggregate gate across the
-        # five-ranker loop. Local defaults are 120s / 180s; CI raises both
-        # to absorb the runner-class delta. See CLAUDE.md "Eval harness".
+        # five-ranker × two-dataset loop. Local defaults are 120s / 180s;
+        # CI raises both to absorb the runner-class delta. See CLAUDE.md
+        # "Eval harness". `--dataset all` runs both lanes; the regression
+        # gate then enforces aggregate ±0.01 on nl2bash and per-query
+        # PASS→FAIL on dogfood (separate gates, both on semantic only).
         env:
           RECALL_EVAL_HARD_FAIL_S: "360"
           RECALL_EVAL_ALL_HARD_FAIL_S: "600"
-        run: uv run --python 3.12 recall eval --dataset nl2bash --output /tmp/ci_eval.json
+        run: uv run --python 3.12 recall eval --dataset all --output /tmp/ci_eval.json
       - name: regression gate (PR only)
         if: github.event_name == 'pull_request'
         run: uv run --python 3.12 python .github/scripts/check_eval_regression.py /tmp/ci_eval.json

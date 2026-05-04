@@ -120,5 +120,240 @@
     "random_baseline_recall_at_5": 0.0005228466960899644,
     "n_queries": 11348,
     "n_corpus": 10624
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "nl2bash",
+    "ranker": "semantic",
+    "recall_at_1": 0.28930207966161436,
+    "recall_at_5": 0.44862530842439197,
+    "mrr": 0.3507152508518388,
+    "runtime_seconds": 27.08,
+    "runtime_breakdown": {
+      "init": 6.14,
+      "index": 6.96,
+      "search": 13.97
+    },
+    "model_name": "BAAI/bge-small-en-v1.5",
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "nl2bash",
+    "ranker": "naive",
+    "recall_at_1": 0.03956644342615439,
+    "recall_at_5": 0.08574198096580896,
+    "mrr": 0.05654594054752673,
+    "runtime_seconds": 10.29,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.0,
+      "search": 10.28
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "nl2bash",
+    "ranker": "token-overlap",
+    "recall_at_1": 0.1609975326048643,
+    "recall_at_5": 0.3071906943954882,
+    "mrr": 0.21461050405357773,
+    "runtime_seconds": 18.79,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.03,
+      "search": 18.76
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "nl2bash",
+    "ranker": "bm25",
+    "recall_at_1": 0.25581600281988015,
+    "recall_at_5": 0.4046528022559041,
+    "mrr": 0.3122106685465868,
+    "runtime_seconds": 35.75,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.02,
+      "search": 35.72
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "nl2bash",
+    "ranker": "fuzzy",
+    "recall_at_1": 0.022559041240747268,
+    "recall_at_5": 0.09631653154740924,
+    "mrr": 0.04904388438491364,
+    "runtime_seconds": 31.1,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.0,
+      "search": 31.09
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "dogfood",
+    "ranker": "semantic",
+    "recall_at_1": 0.4,
+    "recall_at_5": 0.8,
+    "mrr": 0.6,
+    "runtime_seconds": 1.56,
+    "runtime_breakdown": {
+      "init": 1.37,
+      "index": 0.16,
+      "search": 0.03
+    },
+    "model_name": "BAAI/bge-small-en-v1.5",
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.10714285714285714,
+    "n_queries": 5,
+    "n_corpus": 56,
+    "per_query_ranks": [
+      1,
+      1,
+      2,
+      null,
+      2
+    ]
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "dogfood",
+    "ranker": "naive",
+    "recall_at_1": 0.2,
+    "recall_at_5": 0.4,
+    "mrr": 0.24,
+    "runtime_seconds": 0.0,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.0,
+      "search": 0.0
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.10714285714285714,
+    "n_queries": 5,
+    "n_corpus": 56,
+    "per_query_ranks": [
+      5,
+      1,
+      null,
+      null,
+      null
+    ]
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "dogfood",
+    "ranker": "token-overlap",
+    "recall_at_1": 0.2,
+    "recall_at_5": 0.2,
+    "mrr": 0.2,
+    "runtime_seconds": 0.0,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.0,
+      "search": 0.0
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.10714285714285714,
+    "n_queries": 5,
+    "n_corpus": 56,
+    "per_query_ranks": [
+      1,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "dogfood",
+    "ranker": "bm25",
+    "recall_at_1": 0.2,
+    "recall_at_5": 0.2,
+    "mrr": 0.2,
+    "runtime_seconds": 0.0,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.0,
+      "search": 0.0
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.10714285714285714,
+    "n_queries": 5,
+    "n_corpus": 56,
+    "per_query_ranks": [
+      1,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  {
+    "commit_sha": "05d104c5d6082e9235972ce59cf28d96e46f3620",
+    "timestamp": "2026-05-04T19:44:47+00:00",
+    "dataset": "dogfood",
+    "ranker": "fuzzy",
+    "recall_at_1": 0.2,
+    "recall_at_5": 0.2,
+    "mrr": 0.2,
+    "runtime_seconds": 0.0,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.0,
+      "search": 0.0
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.10714285714285714,
+    "n_queries": 5,
+    "n_corpus": 56,
+    "per_query_ranks": [
+      1,
+      null,
+      null,
+      null,
+      null
+    ]
   }
 ]

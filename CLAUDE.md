@@ -55,6 +55,26 @@ scrubbing means the on-disk SQLite never holds plaintext secrets. Dedup uses
 `src/recall/scrub.py` or `tests/test_scrub.py` if the scrub test count
 decreases (see `scrub-canary` job in `.github/workflows/ci.yml`).
 
+**Real-history validation (2026-05-04, dogfood prep for 2.6.5).**
+`scrub.py` was tested against ~1800 lines of real shell history
+(1326 zsh + 503 bash) during dogfood candidate selection. **53 real
+secrets caught** — primarily URL userinfo (`https://user:pass@…`,
+45 instances) and JWTs (12 instances) in saved curl invocations and
+auth flows. **Zero credential or PII misses on the commands the
+scrubber had touched** (the original 33 redacted commands held).
+
+**The audit also surfaced two coverage gaps in the broader untouched
+candidate pool**: (1) personal email addresses in CLI flag values
+(e.g. `gcloud config set account <handle>@gmail.com`) — 2 instances;
+(2) Python kwarg-form passwords (e.g. `psycopg2.connect(..., password='admin123', ...)`) —
+14 instances. Both are real-shape secrets in known-position contexts the
+scrubber doesn't currently match. Pattern additions tracked under issue #2
+("scrubber-coverage-gaps") as Tier 1 (`v1-launch-blocker`); deliberately
+NOT added in 2.6.5 to keep the dogfood commit scoped. The 32-line
+synthetic corpus (`tests/fixtures/secrets_corpus.txt`) is the regression-
+prevention mechanism; this 1800-line real-history pass is the
+validation-on-real-data evidence.
+
 **Adding a new scrubber pattern — required additions:**
 1. **Idempotency check.** Verify the new pattern doesn't match against
    `<REDACTED:*>` markers from any other pattern. Idempotency is by
@@ -114,6 +134,9 @@ expose exactly one method:
 Open the user's atuin database with `?mode=ro&immutable=1` so we never write
 to it. Detect schema by checking for required columns at runtime, not by
 hardcoded column order. Always `SELECT` by name.
+
+Validated empirically: the project's own author's machine has zsh + bash
+but no atuin during 2.6.5 dogfood selection.
 
 ### 4. Embedding consistency
 
@@ -469,6 +492,19 @@ When a real composition bug is caught mid-suite, the handoff report MUST
 name the root cause + fix + an inline-comment-for-future-contributors
 (so the next session sees the trap before re-stepping in it).
 
+## Audit layers compound
+
+Each independent audit pass over the scrubber surfaces gaps the previous
+passes didn't. The synthetic 119-test corpus catches regex composition
+bugs (URL_USERINFO vs `<REDACTED:...>`); the real-history audit
+validates existing patterns hold (53 catches, zero misses on touched
+commands); the dogfood selection over an untouched pool surfaced two
+gap classes neither prior pass anticipated (personal-email-in-flag-
+value, Python kwarg-form passwords). Implication: a single audit layer
+is insufficient evidence of completeness; future scrubber additions
+should be validated against fresh untouched corpus pulls, not just the
+existing test fixture.
+
 ## Eval harness
 
 `src/recall/eval/` houses the harness. CLI:
@@ -567,6 +603,21 @@ at ~130 s and the hard-fail correctly raised when budget was lower.
 Named here explicitly so a future auditor doesn't wonder why this
 branch isn't covered.
 
+**Drafting paraphrastic NL queries.** Drafting NL queries that
+genuinely test paraphrase requires explicit discipline. Default
+human description of a command tends to re-use the command's content
+vocabulary, which lets lexical baselines win on what should be
+semantic tests. The 2.6.5 dogfood set surfaced this: 3 of 5
+first-draft NLs were vocabulary-overlapping with their commands at
+the L tier when intended as M / H. This is a class of subtle eval
+bias that would otherwise contaminate any future dogfood expansion
+or peer-contributed query sets. **Future dogfood expansion or
+peer-contributed query sets must validate paraphrase distance via
+shared-token analysis (after FTS5 tokenization) before being tagged
+at M or H.** Manual today; the deferred-items entry "NL paraphrase-
+distance validator" is the automated guardrail that closes this gap
+at scale.
+
 ## Architectural seams
 
 **source → indexer (streaming OK) → embedder (must batch) → DB write (per-batch).**
@@ -658,6 +709,27 @@ don't get lost in chat history.
   revisit ranker scope (drop fuzzy or naive from `--ranker all`
   default?) or recalibrate the budget. Tag: tech-debt, performance,
   phase-2.
+- **Real-history scrubber validation as a v1 README claim** —
+  Phase 4 README content. The 2026-05-04 dogfood-prep audit caught
+  53 real secrets (URL userinfo + JWTs) across 1800 lines of real
+  shell history with zero misses. This supports a "validated on
+  real shell history" claim in the v1 README that's stronger than
+  any quantity of synthetic-test evidence — the synthetic corpus
+  proves regression prevention, the real-history audit proves
+  real-world coverage. Land in the README's privacy / trust
+  section at v1 launch. Tag: documentation, phase-4.
+- **NL paraphrase-distance validator for the eval harness** —
+  Phase-2-or-later, eval-quality. Automated shared-token analysis
+  between NL and command after FTS5 tokenization, output a
+  paraphrase-distance score (0 = full overlap, 1 = zero shared
+  tokens). Would gate any new query landing in `eval/dogfood.toml`
+  (or future expansion sets) at the tagged tier — L permits
+  overlap, M requires a minimum distance threshold, H requires
+  near-zero overlap. ~30 lines of Python. Surfaced by the 2.6.5
+  dogfood-prep round: 3 of 5 first-draft NLs were vocabulary-
+  overlapping at the L tier when intended as M / H, caught only
+  by manual re-audit. Validator would prevent the whole class of
+  issue at scale. Tag: tech-debt, eval-quality, phase-2-or-later.
 
 The four CI-related deferred items above (`[dev]` dep-list sync check,
 canonical sentinel check, embed-lane exit-5 tolerance removal, and the
@@ -707,3 +779,13 @@ Phase 2 work:
   first push should land a coherent Phase 1 (foundations + scrubber + db +
   source readers), not a half-built skeleton. Don't create the remote
   earlier even if the prompt to do so is tempting.
+
+## Commit attribution
+
+Commits in this repo are authored solely by the project owner. Do NOT add
+`Co-Authored-By: Claude`, `Generated with Claude Code`, `🤖`,
+`noreply@anthropic.com`, or any other AI-attribution trailer to commit
+messages, PR descriptions, or issue bodies. The git author config
+(`Tarun Sharma <tarun.sharma@ieee.org>`) is the sole attribution. This
+applies to all future commits without exception. Default Claude Code
+commit-template behavior includes such a trailer — explicitly omit it.

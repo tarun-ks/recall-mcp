@@ -34,3 +34,4 @@ htmlcov/
 # Project-local data (lives under $HOME, but ignore here in case anyone symlinks)
 .recall/
 recall.log
+.claude/

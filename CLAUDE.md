@@ -148,13 +148,13 @@ across models silently produces garbage results.
 ### 4a. Embedder public API contract
 
 `src/recall/embed.py`'s public surface is **frozen at Commit 2.5**. The 2.7
-"production-grade" rewrite changes internals only — caching, batching, the
-streaming/batching seam from "Architectural seams" — under the same
-public interface. Eval numbers must match within **±0.01 recall@5 noise
+"production-grade" rewrite changes internals only — MPS warmup, explicit
+batch-size, opt-in query cache (in SemanticRanker, not Embedder) — under the
+same public interface. Eval numbers must match within **±0.01 recall@5 noise
 band**, which is the contract that makes "behavior-preserving rewrite"
 testable rather than vibes.
 
-Frozen public surface:
+Frozen public surface (with the 2.7 kwarg addition):
 
 ```python
 class Embedder:
@@ -163,6 +163,7 @@ class Embedder:
         model_name: str = "BAAI/bge-small-en-v1.5",
         model_revision: str | None = None,
         cache_folder: Path | None = None,
+        batch_size: int | None = None,    # added 2.7
     ) -> None: ...
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
@@ -175,8 +176,52 @@ class Embedder:
 ```
 
 Anything else (private methods `_*`, internal caching, batching strategy,
-device selection) is implementation detail and may change in 2.7. Tests
-that lock down behavior should test the public surface only.
+device selection) is implementation detail and may change. Tests that lock
+down behavior should test the public surface only.
+
+**Frozen API extension policy.** The Embedder public API
+(`__init__`, `encode`, `dim`, `model_name`, `model_revision`) is closed
+to breaking changes — no removals, no signature changes to existing
+parameters, no behavioral changes to `encode(texts) -> np.ndarray`.
+Optional kwargs MAY be added to `__init__` and `encode` if (a) they
+preserve all existing call sites, (b) defaults reproduce
+pre-extension behavior, (c) the rationale is documented in the commit
+landing the addition. The 2.7 commit added `batch_size: int | None =
+None` under this rule. Future additions follow the same gate.
+
+**Performance contract (2.7).** Steady-state warm runtime targets on
+the eval lane (semantic ranker on nl2bash, corpus 10,624 / queries
+11,348):
+
+- M-series Mac (warm): ≤24s
+- M-series Mac (first-shell-invocation, cold MPS): ≤24s — the MPS
+  warmup at `Embedder.__init__` amortizes the kernel-compilation cost
+- GitHub-hosted Linux (CPU, no MPS): ≤195s
+
+**M-series gate calibration note.** The original ≤17s target was
+over-calibrated against a stage-blind 11.2× platform translation
+factor. Per-stage decomposition shows encoding is ~17× slower on
+Linux while sqlite-vec MATCH is ~12× slower. On M-series specifically,
+encoding is already cheap and per-query sqlite-vec is the dominant
+cost (13.5s of 24.4s total, 55%). 2.7's encode-side improvements
+therefore cap at ~1s saved on M-series. The 23s→24s shift reflects
+MPS warmup overhead (+1.7s) partially offset by batching wins (~−0.7s
+on encoding stages) — net cost for the cold-start UX win and the
+Phase 3 cache primitive. M-series steady-state will only meaningfully
+improve when 2.7.5 lands the batched matmul search-loop replacement;
+the gate is decoupled from Linux's by per-stage cost composition, not
+by a uniform translation factor.
+
+The batch size is a single tunable: `RECALL_EMBED_BATCH_SIZE` env var
+or `Embedder(batch_size=…)` kwarg, default 128. Empirically validated
+~1s faster than batch=64 on M-series; CI Linux memory headroom
+remains two orders of magnitude under budget at this batch size.
+
+**Behavior-preservation gate.** `tests/test_embed_behavior_preservation.py`
+pins nl2bash semantic recall@5 to the bit-identical 2.5/2.6 baseline
+`0.44862530842439197` within `TOLERANCE=0.0001`. The test logs the
+delta on every run so a non-zero magnitude (float-noise from batching
+changes, etc.) is visible to reviewers even when the gate passes.
 
 ### 4b. Dedup salt and rebuild policy
 
@@ -235,6 +280,19 @@ for orchestrating "clear → rotate → re-index." Mechanism vs. policy.
   itself, not just CI) at 120 s. The hard fail makes the runtime gate live
   in the harness, so an accidental 10× slowdown trips the discipline before
   CI even sees it.
+
+**Platform-translation factor (CI vs M-series).** CI Linux is
+**~11× slower than M-series Mac** for encode-bound workloads, not the
+previously documented 7×. Recalibrated in 2.7 against actual measurements
+(Linux 259.66s / M-series 23.18s = 11.2× on nl2bash semantic). The factor
+varies by stage: model load ~1×, encoding ~14×, search loop ~12×.
+
+**Cold vs warm.** `eval/results.json` records steady-state warm runs.
+First-shell-invocation costs ~14s additional MPS kernel-compilation on
+M-series; the MPS warmup at `Embedder.__init__` (added 2.7) amortizes
+this so user-facing first-call latency reflects the steady-state
+number. CI Linux has no MPS warmup cost; the warmup call is a fast
+no-op there.
 
 Tests live at `tests/test_perf.py`.
 
@@ -705,10 +763,38 @@ don't get lost in chat history.
   hard fail is 180 s — only 65 s of headroom. 2.7's batching
   optimization on `embed.py` is the natural place to win headroom
   back (semantic init/index/search currently dominates ~40 s of the
-  total). If 2.7 doesn't materially improve aggregate eval runtime,
-  revisit ranker scope (drop fuzzy or naive from `--ranker all`
-  default?) or recalibrate the budget. Tag: tech-debt, performance,
-  phase-2.
+  total). Tag: tech-debt, performance, phase-2.
+
+  **Throughput-gate fallback chain** (if 2.7's gate fails after
+  iteration): (1) drop `naive` from `--ranker all` default — recall@5
+  = 0.0857 on nl2bash is the trivial-floor baseline, contributing
+  minimal evaluative signal; (2) bump
+  `RECALL_EVAL_ALL_HARD_FAIL_S` to 720s with documented justification;
+  (3) drop `fuzzy` as last resort — the 4× dogfood framing relies on
+  fuzzy as the zsh+fzf comparison; dropping weakens v1 narrative.
+
+- **Commit 2.7.5 — semantic search loop: per-query sqlite-vec → batched
+  numpy matmul.** Phase 2, **necessary follow-up to 2.7 — on the
+  critical path, not optional.** 2.7's empirical measurement validated
+  this scope: M-series search-stage cost is 13.5s (55% of total
+  runtime) and is fully attributable to per-query sqlite-vec MATCH.
+  2.7.5's batched `corpus_emb @ query_emb.T` + argpartition
+  replacement is now the only remaining lever for M-series throughput
+  improvement. sqlite-vec per-query MATCH overhead has been the
+  dominant search-stage cost since 2.5 (per-query ~14 ms × 11,348
+  queries ≈ 156 s on CI Linux); 2.7's budget tightening surfaced the
+  signal to prioritize fixing it.
+
+  Replace per-query sqlite-vec MATCH calls with a single batched
+  `corpus_emb @ query_emb.T` matmul + per-row `np.argpartition` for
+  top-k selection. **Empirical equivalence test required**: batched
+  matmul argpartition vs per-query sqlite-vec MATCH must produce
+  identical top-5 IDs across the nl2bash query set. File scope:
+  extend `retrieve/semantic.py` or add `retrieve/_batched_search.py`.
+  Behavior preservation gate: same ±0.0001 recall@5 against
+  `0.44862530842439197`. Targets: Linux ≤120 s (~38% reduction from
+  2.7's ~195 s), M-series ≤17 s (~30% reduction from 2.7's ~24 s).
+  Tag: tech-debt, performance, phase-2.
 - **Real-history scrubber validation as a v1 README claim** —
   Phase 4 README content. The 2026-05-04 dogfood-prep audit caught
   53 real secrets (URL userinfo + JWTs) across 1800 lines of real

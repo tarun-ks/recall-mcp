@@ -1,10 +1,11 @@
 """Tests for the eval harness.
 
-The big test is marked ``@pytest.mark.embed`` — it loads the real
-sentence-transformers model and runs an end-to-end synthetic eval. This
-is the FIRST embed-marked test in the project; its existence closes the
-deferred-issue about the embed-lane exit-5 tolerance in ci.yml (which is
-removed in this same commit).
+The synthetic-eval test is marked ``@pytest.mark.embed`` because it
+loads the real sentence-transformers model — Phase 1's first
+embed-marked test, retained from Commit 2.5.
+
+Per-ranker exact-recall tests live in ``test_retrieve.py`` (no embed
+marker required for the lexical rankers).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 import pytest
 
 from recall.eval.runner import EvalCase, run_eval
+from recall.retrieve.semantic import SemanticRanker
 
 
 @dataclass
@@ -70,32 +72,33 @@ _SYNTHETIC_CORPUS = (
 
 
 @pytest.mark.embed
-def test_synthetic_eval_runs_end_to_end() -> None:
-    """End-to-end on a 5-query / 20-command synthetic dataset.
+def test_synthetic_semantic_eval_runs_end_to_end() -> None:
+    """End-to-end on a 5-query / 20-command synthetic dataset with the
+    real bge-small-en-v1.5 semantic ranker.
 
-    Verifies the eval harness pipeline (model load → corpus embed → index
-    build → query embed → search → metrics) completes cleanly with the
-    real bge-small-en-v1.5 model.
+    Verifies the eval harness pipeline (init → index → search → metrics)
+    completes cleanly through the SemanticRanker path.
     """
     ds = _SyntheticDataset(
         name="synthetic",
         _cases=_SYNTHETIC_CASES,
         _corpus=_SYNTHETIC_CORPUS,
     )
-    result = run_eval(ds)
+    result = run_eval(ds, lambda: SemanticRanker())
 
+    assert result.ranker == "semantic"
     assert result.n_queries == 5
     assert result.n_corpus == 20
 
-    # Conservative thresholds — bge-small handles these clean cases easily but
-    # we don't want flakiness from minor floating-point variation across runners.
-    assert result.recall_at_5 >= 0.6, f"synthetic recall@5 too low: {result.recall_at_5}"
+    # Conservative thresholds — bge-small handles these cleanly aligned cases
+    # easily, but we don't want flakiness from minor floating-point variation.
+    assert result.recall_at_5 >= 0.6, f"recall@5 too low: {result.recall_at_5}"
     assert result.mrr > 0.0
     assert result.recall_at_5 > result.random_baseline_recall_at_5
 
     # Schema sanity.
-    assert result.model_name.endswith("bge-small-en-v1.5")
-    for stage in ("model_load", "corpus_embed", "index_build", "query_embed", "search"):
+    assert result.model_name is not None and result.model_name.endswith("bge-small-en-v1.5")
+    for stage in ("init", "index", "search"):
         assert stage in result.runtime_breakdown, f"missing stage: {stage}"
 
     # Synthetic should finish well under 60s even with cold model load.

@@ -3,6 +3,7 @@
     "commit_sha": "2a83df351cce3df0574292937d70f432b90d60c5",
     "timestamp": "2026-05-03T12:55:52+00:00",
     "dataset": "nl2bash",
+    "ranker": "semantic",
     "recall_at_1": 0.28930207966161436,
     "recall_at_5": 0.44862530842439197,
     "mrr": 0.3507152508518388,
@@ -15,6 +16,106 @@
       "search": 9.04
     },
     "model_name": "BAAI/bge-small-en-v1.5",
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "6c467c4f024c28e7887191ac79fe0a1fef8a776a",
+    "timestamp": "2026-05-04T15:11:45+00:00",
+    "dataset": "nl2bash",
+    "ranker": "semantic",
+    "recall_at_1": 0.28930207966161436,
+    "recall_at_5": 0.44862530842439197,
+    "mrr": 0.3507152508518388,
+    "runtime_seconds": 39.54,
+    "runtime_breakdown": {
+      "init": 20.35,
+      "index": 5.81,
+      "search": 13.37
+    },
+    "model_name": "BAAI/bge-small-en-v1.5",
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "6c467c4f024c28e7887191ac79fe0a1fef8a776a",
+    "timestamp": "2026-05-04T15:11:45+00:00",
+    "dataset": "nl2bash",
+    "ranker": "naive",
+    "recall_at_1": 0.03956644342615439,
+    "recall_at_5": 0.08574198096580896,
+    "mrr": 0.05654594054752673,
+    "runtime_seconds": 9.29,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.0,
+      "search": 9.29
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "6c467c4f024c28e7887191ac79fe0a1fef8a776a",
+    "timestamp": "2026-05-04T15:11:45+00:00",
+    "dataset": "nl2bash",
+    "ranker": "token-overlap",
+    "recall_at_1": 0.1609975326048643,
+    "recall_at_5": 0.3071906943954882,
+    "mrr": 0.21461050405357773,
+    "runtime_seconds": 17.54,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.03,
+      "search": 17.51
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "6c467c4f024c28e7887191ac79fe0a1fef8a776a",
+    "timestamp": "2026-05-04T15:11:45+00:00",
+    "dataset": "nl2bash",
+    "ranker": "bm25",
+    "recall_at_1": 0.25581600281988015,
+    "recall_at_5": 0.4046528022559041,
+    "mrr": 0.3122106685465868,
+    "runtime_seconds": 34.82,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.03,
+      "search": 34.79
+    },
+    "model_name": null,
+    "model_revision": null,
+    "random_baseline_recall_at_5": 0.0005228466960899644,
+    "n_queries": 11348,
+    "n_corpus": 10624
+  },
+  {
+    "commit_sha": "6c467c4f024c28e7887191ac79fe0a1fef8a776a",
+    "timestamp": "2026-05-04T15:11:45+00:00",
+    "dataset": "nl2bash",
+    "ranker": "fuzzy",
+    "recall_at_1": 0.022559041240747268,
+    "recall_at_5": 0.09631653154740924,
+    "mrr": 0.04904388438491364,
+    "runtime_seconds": 29.29,
+    "runtime_breakdown": {
+      "init": 0.0,
+      "index": 0.0,
+      "search": 29.29
+    },
+    "model_name": null,
     "model_revision": null,
     "random_baseline_recall_at_5": 0.0005228466960899644,
     "n_queries": 11348,

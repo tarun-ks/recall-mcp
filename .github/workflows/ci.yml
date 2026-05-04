@@ -63,13 +63,16 @@ jobs:
       - name: pytest (embed only)
         run: uv run --python 3.12 pytest -m embed
       - name: recall eval (nl2bash)
-        # GitHub-hosted Linux is ~7× slower than M-series Mac for embedding
-        # work (CPU vs MPS). Empirical wall-clock: ~255s on a fresh runner.
-        # Local dev stays at the 120s default; the harness's hard-fail gate
-        # still trips locally if a 10× regression lands. See CLAUDE.md
-        # "Eval harness" + runner.py for the env-var contract.
+        # GitHub-hosted Linux is ~7x slower than M-series Mac for embedding
+        # work (CPU vs MPS). Two separate budgets: per-ranker hard fail
+        # (RECALL_EVAL_HARD_FAIL_S, set in runner.py) is the anomaly
+        # detector for any single ranker; all-rankers cumulative
+        # (RECALL_EVAL_ALL_HARD_FAIL_S) is the aggregate gate across the
+        # five-ranker loop. Local defaults are 120s / 180s; CI raises both
+        # to absorb the runner-class delta. See CLAUDE.md "Eval harness".
         env:
           RECALL_EVAL_HARD_FAIL_S: "360"
+          RECALL_EVAL_ALL_HARD_FAIL_S: "600"
         run: uv run --python 3.12 recall eval --dataset nl2bash --output /tmp/ci_eval.json
       - name: regression gate (PR only)
         if: github.event_name == 'pull_request'

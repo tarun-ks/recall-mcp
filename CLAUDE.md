@@ -218,33 +218,70 @@ Tests live at `tests/test_perf.py`.
 ### 7. Eval harness must run
 
 `recall eval --dataset nl2bash` builds a fresh in-memory index from nl2bash
-commands, runs all NL queries, reports recall@1, recall@5, MRR.
+commands, runs all NL queries against five rankers (semantic + four lexical
+baselines), reports recall@1 / recall@5 / MRR per ranker.
 
-**Calibrated baseline (Commit 2.5, bge-small-en-v1.5):**
+**Calibrated baseline (Commit 2.6, bge-small-en-v1.5):**
 
-| metric | value |
+| ranker | recall@1 | recall@5 | MRR | semantic Δ |
+| --- | --- | --- | --- | --- |
+| semantic | 0.2893 | 0.4486 | 0.3507 | (baseline) |
+| bm25 | 0.2558 | 0.4047 | 0.3122 | 1.11× |
+| token-overlap | 0.1610 | 0.3072 | 0.2146 | 1.46× |
+| fuzzy | 0.0226 | 0.0963 | 0.0490 | 4.66× |
+| naive | 0.0396 | 0.0857 | 0.0565 | 5.23× |
+
+Random-baseline recall@5: 0.0005 (≈ 5/10624).
+
+The recall@5 = 0.4486 number is empirical, not aspirational. The original
+brief wrote "recall@5 > 0.75" — that was aspirational language;
+bge-small-en-v1.5 at default settings lands at 0.45 on `nl2bash`.
+
+**Paraphrastic-bias note (design feature, not caveat).** nl2bash is
+constructed to test paraphrase handling — many NL queries are
+paraphrases of the same intent, mapping to commands with different
+surface forms. Lexical baselines being weak on paraphrastic queries is
+the dataset measuring exactly what semantic retrieval is for. The
+"naive" / "fuzzy" rankers landing at recall@5 ~ 0.09 isn't a flaw of
+the eval; it's the eval doing its job. Conversely, BM25 being
+relatively strong (0.4047) on nl2bash reflects BM25's IDF weighting
+handling rare-term paraphrases well — an honest IR baseline, not a
+strawman.
+
+**Headline pitch is delta-vs-lexical-baseline, not absolute recall@5.**
+Decision tree for v1 model choice (three-way, after Commit 2.6 numbers
+landed at 1.11× vs the strongest lexical):
+
+| semantic vs strongest lexical baseline on nl2bash | action |
 | --- | --- |
-| recall@1 | 0.29 |
-| recall@5 | 0.45 |
-| MRR | 0.35 |
-| random-baseline recall@5 | 0.0005 |
+| ≥ 2× | ship bge-small-en-v1.5 in v1; the delta is the value-prop |
+| 1.5× – 2× | evaluate bge-base before v1 (mid-size step) |
+| < 1.5× | evaluate bge-large or gte-large directly; bge-base is unlikely to be enough given the gap |
 
-The recall@5 = 0.45 number is the empirical baseline, not an aspirational
-target. The original brief wrote "recall@5 > 0.75" — that was aspirational
-language; bge-small at default settings lands at 0.45 on `nl2bash`.
+**Commit 2.6's number lands in the bottom bucket (1.11× vs BM25).** The
+next model experiment should be bge-large or gte-large (skipping
+bge-base, which is unlikely to close the gap). This decision is
+*conditional on data we don't have yet* — see "next experiments" below.
 
-**Headline pitch is delta-vs-substring, not absolute recall@5.** The
-substring baseline (Commit 2.6, same harness) is the comparison point.
-Decision tree for v1 model choice:
+**Two pending experiments before any v1 model decision:**
 
-| substring → semantic delta on nl2bash | action |
-| --- | --- |
-| ≥ 2× (e.g. substring 0.10 → semantic 0.45) | bge-small ships in v1; the delta is the value-prop |
-| < 2× | evaluate larger embedding models (bge-large, gte-large, etc.) before v1 launch; weigh size vs quality |
+1. **Dogfood numbers on real shell history.** Lexical noise in actual
+   shell history (typos, project-specific jargon, abbreviations) is
+   plausibly higher than in `nl2bash`'s curated NL paraphrases. The
+   semantic vs lexical delta may widen meaningfully on dogfood and
+   narrow in nl2bash's favor. Both numbers are required for the v1
+   model decision; nl2bash alone is insufficient. Lands in a follow-up
+   commit (call it 2.6.5) immediately after 2.6.
+2. **bge-large or gte-large head-to-head.** Single-run comparison of
+   the larger embedders against bge-small on the same eval harness.
+   If a larger model materially closes the 1.11× gap on `nl2bash` AND
+   improves dogfood numbers, ship the larger one. If not, the v1 story
+   shifts toward "fast local CPU semantic with modest delta over BM25"
+   rather than "semantic crushes lexical."
 
-These numbers ship in the README at v1, alongside the substring delta —
-the absolute recall@5 alone is uninterpretable to a drive-by visitor; the
-delta tells the value story.
+These numbers ship in the README at v1, alongside the lexical-delta
+table — the absolute recall@5 alone is uninterpretable to a drive-by
+visitor; the delta tells the value story.
 
 ## MCP tool surface (locked signatures)
 
@@ -397,6 +434,28 @@ broken at the boundary. Named instances:
   `if TYPE_CHECKING:` for type hints + in-method imports for runtime.**
   Fix: move `SentenceTransformer` import inside `Embedder.__init__`,
   use `if TYPE_CHECKING:` for annotations.
+- **2.6 — C-backed library performance: kernel vs dispatch.**
+  ``rapidfuzz.process.extract`` per-query was 329 s for fuzzy retrieval
+  over nl2bash. ``rapidfuzz.process.cdist(..., workers=-1)`` brought
+  it to 31 s — a 9× speedup that comes entirely from running the C
+  kernel multi-threaded on M-series cores instead of single-threaded.
+  The first pattern dispatches into the C kernel ~11k times (one per
+  query) with Python-loop overhead between dispatches; the second
+  hands the whole 11k × 10k pairwise matrix to one C call. **Lesson:
+  when integrating a C-backed library, verify the bottleneck is in
+  the C kernel, not in the Python dispatch layer above it.
+  Performance docs typically describe kernel throughput; the actual
+  code path may be Python-bound and the benchmark numbers won't apply
+  unless you batch.** Fix: use the library's batch / matrix /
+  parallel API, not the per-item one. (See ``recall.retrieve.fuzzy``.)
+- **2.6 — `multiprocessing.Pool` for Python-loop-bound rankers.**
+  Naive substring at 85 s single-threaded → 11 s with a process pool
+  (helper function module-level for picklability — same pattern
+  that's now in ``recall.retrieve.substring._score_chunk``). For pure
+  Python ranking loops there's no C kernel to lean on; the only
+  speedup is multi-process parallelism. Token-overlap and similar
+  pure-Python rankers should reach for the same pattern when their
+  scale grows.
 
 **Discipline:** when introducing a new primitive that interacts with
 existing ones, write the *composition test first*. Don't trust that the
@@ -415,43 +474,98 @@ name the root cause + fix + an inline-comment-for-future-contributors
 `src/recall/eval/` houses the harness. CLI:
 
 ```bash
-recall eval --dataset nl2bash               # appends to eval/results.json
-recall eval --dataset nl2bash --no-append   # prints only; doesn't touch history
-recall eval --dataset nl2bash --output PATH # custom history file (CI uses /tmp)
+recall eval --dataset nl2bash                       # all five rankers (default)
+recall eval --dataset nl2bash --ranker semantic     # one ranker for iteration
+recall eval --dataset nl2bash --ranker bm25
+recall eval --dataset nl2bash --no-append           # prints only; no history write
+recall eval --dataset nl2bash --output PATH         # custom history file (CI uses /tmp)
 ```
 
+**Five rankers** (all five run by default per Phase 2 cadence — every
+retrieval-touching commit reports all five recall@5 numbers):
+
+| ranker | what it is | source |
+| --- | --- | --- |
+| `semantic` | bge-small-en-v1.5 + sqlite-vec KNN — the value prop | `recall.retrieve.semantic` |
+| `naive` | whitespace-split query words as substrings, count-ranked | `recall.retrieve.substring` |
+| `token-overlap` | FTS5-tokenized intersection-count ranking | `recall.retrieve.token_overlap` |
+| `bm25` | FTS5's `bm25()` over `unicode61 remove_diacritics 1` tokens | `recall.retrieve.bm25` |
+| `fuzzy` | rapidfuzz `partial_ratio` (fzf-like, not exactly fzf) | `recall.retrieve.fuzzy` |
+
+**FTS5 tokenizer is the shared source of truth** for `token-overlap`
+and `bm25`. BM25 uses SQLite FTS5's built-in `unicode61
+remove_diacritics 1` tokenizer directly. Token-overlap uses
+`recall.retrieve.base.fts5_unicode61_tokenize`, a Python-side
+approximation of the same tokenizer (NFKD normalization + drop
+combining diacritics + casefold + alphanumeric token regex). The two
+agree on virtually all practical inputs; rare Unicode edge cases
+(scripts whose Letter/Digit classification differs slightly between
+Python's `re` and SQLite's table) may produce a token here or there
+that's in one but not the other. The agreement is what makes the two
+numbers directly comparable on the same corpus.
+
+**`fuzzy` is fzf-*like*, not exactly fzf.** Real fzf adds bonuses for
+word-boundary and camelCase matches that `rapidfuzz.partial_ratio`
+doesn't model. The user-facing claim is "we beat what zsh+fzf users
+do today," not "we beat fzf's exact scoring algorithm." If we ever
+need higher fidelity, we can shell out to the fzf binary or evaluate
+`pyfzf` — that's a Phase 4 polish concern, not a 2.6 blocker.
+
 **Datasets:** `nl2bash` is shipped at 2.5. The dogfood dataset (real
-zsh-history queries) lands in a follow-up commit; until then,
-`eval/dogfood.toml` is a stub.
+zsh-history queries from the maintainer) lands in 2.6.5 immediately
+after 2.6 — the 1.11× semantic-vs-BM25 finding makes dogfood numbers
+materially more important than they were before that delta landed.
 
-**What it does.** Builds an in-memory `:memory:` SQLite + `sqlite-vec`
-index from the dataset's corpus, embeds every NL query, runs vector KNN
-search per query, computes recall@1 / recall@5 / MRR with **multi-
-reference semantics** ("any gold-reference command in top k counts as a
-hit"). Reports a runtime breakdown — `model_load`, `corpus_embed`,
-`index_build`, `query_embed`, `search`, `total` — so the first-run
-(includes ~120 MB model download) vs cached-run distinction is legible
-in output, not buried in a single 60s number. Also prints the random
-baseline (`avg_gold * k_max / n_corpus`) so the absolute recall@5 number's
-magnitude is interpretable for anyone reading the README.
+**What it does.** Builds an in-memory `:memory:` index per ranker
+(SemanticRanker uses sqlite-vec; Bm25Ranker uses FTS5; the others use
+plain Python state). For each ranker: instantiate, index the corpus,
+search every query, compute recall@1 / recall@5 / MRR with **multi-
+reference semantics** ("any gold-reference command in top k counts as
+a hit"). Reports a runtime breakdown per ranker (`init`, `index`,
+`search`, `total`) — so first-run-with-model-download vs cached
+semantic init is legible, not buried in a single 60s number. Also
+prints the random baseline (`avg_gold * k_max / n_corpus`) so the
+absolute recall@5 number's magnitude is interpretable.
 
-**Runtime gates** (in the harness itself, not just CI):
-- target ≤ 60 s on M-series Mac
-- soft warning at 90 s (printed by CLI)
-- hard fail at 120 s (`EvalRuntimeError` raised by the runner)
+**Runtime gates — two separate budgets:**
 
-The hard fail in the harness means an accidental 10× slowdown trips the
-discipline before CI even sees it.
+*Per-ranker hard fail* — anomaly detector for any single ranker:
+- soft target ≤ 60 s on M-series for one ranker
+- hard fail at 120 s (`EvalRuntimeError` from runner.py)
+- `RECALL_EVAL_HARD_FAIL_S` env override (CI sets 360s)
 
-**`RECALL_EVAL_HARD_FAIL_S` env override** is for CI specifically, NOT
-for raising the local discipline ceiling. GitHub-hosted Linux runners
-are ~7× slower than M-series Mac for embedding (CPU vs MPS); empirical
-wall-clock on a fresh runner is ~255 s vs ~25 s locally. CI sets
-`RECALL_EVAL_HARD_FAIL_S=360` in the workflow env to absorb the
-runner-class delta without softening the 120 s local gate. If you find
-yourself wanting to raise the local ceiling, that's a signal something
-else is wrong (a regression, a bigger model, etc.) — investigate before
-adjusting.
+*All-rankers cumulative* — aggregate across `--ranker all`:
+- soft warning at 120 s on M-series (printed by CLI)
+- hard fail at 180 s (CLI raises)
+- `RECALL_EVAL_ALL_HARD_FAIL_S` env override (CI sets 600s)
+
+The two-budget split exists because per-ranker tightness (an
+anomaly detector for "did one ranker suddenly 10×?") is different
+from cumulative tightness (the aggregate budget for the all-rankers
+loop). Empirical M-series wall-clock for `--ranker all` is ~120-130s
+warm; the 180s hard fail gives ~50% headroom against drift. CI
+Linux is ~3× slower for the lexical rankers and ~7× for embedding;
+600s ceiling preserves the same 50% headroom rule there.
+
+The hard fails in both runner.py (per-ranker) and CLI (cumulative)
+mean an accidental 10× slowdown trips the discipline before CI even
+sees it. The env-var overrides exist for CI's runner-class delta
+specifically — NOT for raising the local discipline ceiling. If you
+find yourself wanting to raise the local ceiling, that's a signal
+something else is wrong (a regression, a bigger model, a
+parallelization regression, etc.) — investigate before adjusting.
+
+**Test coverage exemption: the cumulative-budget logic in
+`recall.cli` (the `RECALL_EVAL_ALL_HARD_FAIL_S` handling and the
+`time.perf_counter()` cumulative check across the all-rankers loop)
+is intentionally NOT covered by automated tests.** Exercising it
+end-to-end requires a slow eval invocation; mocking the timing or
+fabricating ranker delays would test the mock, not the production
+code path. Manual verification only — confirmed at Commit 2.6 by
+running `recall eval --ranker all` and observing the soft-warn fire
+at ~130 s and the hard-fail correctly raised when budget was lower.
+Named here explicitly so a future auditor doesn't wonder why this
+branch isn't covered.
 
 ## Architectural seams
 
@@ -534,6 +648,16 @@ don't get lost in chat history.
   versions when newer ones release with Node 24 support, or opt in
   early via `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` in the workflow
   env block. Don't ignore — full Node 20 removal is 2026-09-16.
+- **Eval all-rankers wall-clock tension with 2.7's batching** —
+  Phase 2 perf-budget concern. Empirical M-series warm runtime for
+  `recall eval --ranker all` is ~115 s; the all-rankers cumulative
+  hard fail is 180 s — only 65 s of headroom. 2.7's batching
+  optimization on `embed.py` is the natural place to win headroom
+  back (semantic init/index/search currently dominates ~40 s of the
+  total). If 2.7 doesn't materially improve aggregate eval runtime,
+  revisit ranker scope (drop fuzzy or naive from `--ranker all`
+  default?) or recalibrate the budget. Tag: tech-debt, performance,
+  phase-2.
 
 The four CI-related deferred items above (`[dev]` dep-list sync check,
 canonical sentinel check, embed-lane exit-5 tolerance removal, and the

@@ -21,11 +21,12 @@ def test_default_model_is_bge_small() -> None:
     assert DEFAULT_MODEL == "BAAI/bge-small-en-v1.5"
 
 
-def test_default_batch_size_is_128() -> None:
-    """The 2.7 default batch size is 128 (validated against M-series MPS and
-    CI Linux CPU; CLAUDE.md §4a "Performance contract"). Changing this
-    requires re-running the full eval gate to confirm behavior preservation."""
-    assert DEFAULT_BATCH_SIZE == 128
+def test_default_batch_size_is_64() -> None:
+    """The 2.7 default batch size is 64 — the platform-balanced compromise
+    validated against M-series MPS and CI Linux CPU (CLAUDE.md §6 "Platform-
+    divergent optimal batch sizes"). Changing this requires re-running the
+    full eval gate on both platforms to confirm behavior preservation."""
+    assert DEFAULT_BATCH_SIZE == 64
 
 
 @pytest.mark.embed

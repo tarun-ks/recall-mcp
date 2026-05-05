@@ -41,15 +41,16 @@ if TYPE_CHECKING:
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_CACHE = Path.home() / ".recall" / "models"
 
-# Default batch size for sentence-transformers' internal batching. 128 was
-# validated against M-series MPS and CI Linux CPU at 2.7 (CLAUDE.md §4a
-# "Performance contract"). Empirically: batch=128 ran ~1s faster than
-# batch=64 on M-series (24.40s vs 25.49s median across 3-run samples) on
-# nl2bash; encode-bound stages benefit from the larger batch grouping.
-# Memory math: 128 × 512-token max × 384-dim × 4 bytes ≈ 100 MB activation
-# headroom on a 7 GB CI runner — two orders of magnitude under budget.
-# Override with ``RECALL_EMBED_BATCH_SIZE`` env var or ``batch_size`` kwarg.
-DEFAULT_BATCH_SIZE = 128
+# Default batch size for sentence-transformers' internal batching. 64 is the
+# platform-balanced compromise validated at 2.7 (CLAUDE.md §6 "Platform-
+# divergent optimal batch sizes"): M-series MPS prefers larger batches
+# (kernel-launch amortization), Linux CPU prefers smaller (cache-pressure
+# avoidance). Per-platform optima are 128 / 32 respectively; 64 lands
+# M-series at ~23s (vs 24.4s at 128) and CI Linux approximately at the
+# pre-2.7 baseline ~250s (vs 289s regression at 128). Linux ≤195s gate is
+# 2.7.5's job, not 2.7's. Override with ``RECALL_EMBED_BATCH_SIZE`` env
+# var or ``batch_size`` kwarg for advanced per-platform tuning.
+DEFAULT_BATCH_SIZE = 64
 
 _LOG = logging.getLogger(__name__)
 

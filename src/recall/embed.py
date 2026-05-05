@@ -1,16 +1,18 @@
 """Embedding model wrapper.
 
-Public API frozen at Commit 2.5. Commit 2.7 will rewrite internals
-(caching, batching, the streaming/batching seam from CLAUDE.md
-"Architectural seams") behind this same surface — eval numbers
-must match within ±0.01 recall@5 noise band, which is the contract
-that makes "behavior-preserving rewrite" testable.
+Public API frozen at Commit 2.5; internals rewritten in Commit 2.7
+behavior-preservingly (MPS warmup at construction time, explicit
+batch-size control, DEBUG-level encode logging). The 2.7 commit added
+the optional ``batch_size`` kwarg to ``__init__`` under CLAUDE.md §4a's
+"Frozen API extension policy" rule (optional, default-preserving,
+documented at landing).
 
 Frozen public surface:
 
     Embedder(model_name: str = "BAAI/bge-small-en-v1.5",
              model_revision: str | None = None,
-             cache_folder: Path | None = None)
+             cache_folder: Path | None = None,
+             batch_size: int | None = None)   # added 2.7
 
     Embedder.encode(texts: Sequence[str]) -> np.ndarray
         # shape: (len(texts), dim); L2-normalized
@@ -20,11 +22,13 @@ Frozen public surface:
     Embedder.model_revision  # the revision pinned, or None (read-only)
 
 Anything else (private methods, internal caching, batching strategy) is
-implementation detail and may change in 2.7.
+implementation detail and may change.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,16 +41,29 @@ if TYPE_CHECKING:
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_CACHE = Path.home() / ".recall" / "models"
 
+# Default batch size for sentence-transformers' internal batching. 64 is the
+# platform-balanced compromise validated at 2.7 (CLAUDE.md §6 "Platform-
+# divergent optimal batch sizes"): M-series MPS prefers larger batches
+# (kernel-launch amortization), Linux CPU prefers smaller (cache-pressure
+# avoidance). Per-platform optima are 128 / 32 respectively; 64 lands
+# M-series at ~23s (vs 24.4s at 128) and CI Linux approximately at the
+# pre-2.7 baseline ~250s (vs 289s regression at 128). Linux ≤195s gate is
+# 2.7.5's job, not 2.7's. Override with ``RECALL_EMBED_BATCH_SIZE`` env
+# var or ``batch_size`` kwarg for advanced per-platform tuning.
+DEFAULT_BATCH_SIZE = 64
+
+_LOG = logging.getLogger(__name__)
+
 
 class Embedder:
-    """Thin wrapper around sentence-transformers. Minimal in 2.5; rewritten
-    behavior-preservingly in 2.7."""
+    """sentence-transformers wrapper with MPS warmup + explicit batching."""
 
     def __init__(
         self,
         model_name: str = DEFAULT_MODEL,
         model_revision: str | None = None,
         cache_folder: Path | None = None,
+        batch_size: int | None = None,
     ) -> None:
         # Lazy import: sentence_transformers pulls torch (~25s + ~150 MB),
         # which we don't want triggered just by importing `recall.embed`
@@ -55,6 +72,14 @@ class Embedder:
 
         self.model_name = model_name
         self.model_revision = model_revision
+
+        # Resolve batch_size: explicit kwarg > env var > default.
+        if batch_size is not None:
+            self._batch_size = batch_size
+        else:
+            env_val = os.environ.get("RECALL_EMBED_BATCH_SIZE")
+            self._batch_size = int(env_val) if env_val else DEFAULT_BATCH_SIZE
+
         cache = cache_folder if cache_folder is not None else DEFAULT_CACHE
         cache.mkdir(parents=True, exist_ok=True)
         self._model: SentenceTransformer = SentenceTransformer(
@@ -74,6 +99,26 @@ class Embedder:
             raise RuntimeError(f"could not determine embedding dim for {model_name!r}")
         self.dim: int = d
 
+        # MPS warmup: first encode on Apple Silicon pays a ~14s kernel-
+        # compilation cost. Doing a tiny dummy encode at construction
+        # amortizes that into init time — by the time the first real
+        # encode happens, MPS kernels are compiled. CI Linux CPU has no
+        # warmup cost; the call is a fast no-op there.
+        try:
+            self._model.encode(
+                ["warmup"],
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                batch_size=self._batch_size,
+            )
+        except BaseException as e:
+            # Don't brick Embedder construction on a warmup failure — the
+            # first real encode just pays the cost itself, identical to
+            # pre-2.7 behavior. Future PyTorch versions or unusual
+            # hardware shouldn't break us here.
+            _LOG.debug("MPS warmup failed (non-fatal): %r", e)
+
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         """Embed ``texts`` into an (N, dim) float32 array, L2-normalized.
 
@@ -82,15 +127,17 @@ class Embedder:
         with normalized vectors L2 and cosine rank identically, so the
         same vectors work for both.
         """
+        _LOG.debug("encode: %d texts, batch_size=%d", len(texts), self._batch_size)
         out: np.ndarray = self._model.encode(
             list(texts),
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False,
+            batch_size=self._batch_size,
         )
         # sentence-transformers may return float64 on some platforms; coerce
         # to float32 to match sqlite-vec's FLOAT[N] storage.
         return np.asarray(out, dtype=np.float32)
 
 
-__all__ = ("DEFAULT_MODEL", "Embedder")
+__all__ = ("DEFAULT_BATCH_SIZE", "DEFAULT_MODEL", "Embedder")

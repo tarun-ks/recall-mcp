@@ -61,6 +61,16 @@ jobs:
       - name: sync deps
         run: uv sync --python 3.12
       - name: pytest (embed only)
+        # Match the env override below — the behavior-preservation test
+        # (added 2.7) calls run_eval() inside pytest, which inherits
+        # HARD_RUNTIME_FAIL_S=120 from runner.py's default. CI Linux
+        # semantic eval is ~260s; without this override the test errors
+        # on the runtime gate before it gets to compute recall@5.
+        # Composition bug #7 in CLAUDE.md — context-aware defaults are
+        # the deeper fix; this one-line workflow override patches the
+        # symptom for now.
+        env:
+          RECALL_EVAL_HARD_FAIL_S: "360"
         run: uv run --python 3.12 pytest -m embed
       - name: recall eval (nl2bash + dogfood)
         # GitHub-hosted Linux is ~7x slower than M-series Mac for embedding

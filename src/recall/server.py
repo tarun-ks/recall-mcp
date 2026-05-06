@@ -19,7 +19,14 @@ ARCHITECTURE (locked in Phase-3 §§1-10 planning round)
   Q5 errors:     Strategy (a) — server starts even with no/stale index;
                  tool calls return structured MCP errors per state.
   Q7 lifecycle:  Lazy embedder load (first tool call pays ~5s).
-                 Startup-only stale-index detection.
+                 Startup-only stale-MODEL detection (model staleness
+                 requires --rebuild; that's a concurrent-indexer scenario,
+                 unsupported per documented constraint).
+                 Lazy index-EXISTENCE detection: server re-probes the DB
+                 before every tool call while has_index=False. Fixes the
+                 first-run UX where users run ``recall index`` AFTER
+                 starting their MCP client. Once has_index=True observed,
+                 refresh becomes a no-op for the process lifetime.
                  Concurrent indexer+server is unsupported (documented).
   Q8 logging:    INFO default; ``RotatingFileHandler`` at
                  ``~/.recall/logs/recall.log`` (mode 0o700);
@@ -102,11 +109,17 @@ class ServerState:
 
 # Module-level state for the server process. Per-process singletons; the
 # server is single-tenant by design (one MCP client connection at a time
-# via stdio). State is computed once at startup; tool handlers read it.
+# via stdio). State is computed at startup; ``_maybe_refresh_state`` re-
+# probes the DB before every tool call WHILE ``_state.has_index`` is
+# False, so users who run ``recall index`` AFTER launching their MCP
+# client (Claude Desktop, Cursor, etc.) don't have to restart the client
+# to pick up the freshly-built index. Once ``has_index=True`` is
+# observed, refresh becomes a no-op for the rest of the process lifetime.
 _state: ServerState | None = None
 _db_conn: sqlite3.Connection | None = None
 _embedder: Embedder | None = None
 _embedder_lock: asyncio.Lock | None = None  # constructed in main()
+_state_lock: asyncio.Lock | None = None  # constructed in main()
 
 
 def compute_initial_state(
@@ -284,6 +297,65 @@ async def encode_async(texts: Sequence[str]) -> np.ndarray:
         return await asyncio.to_thread(_encode_with_redirect, embedder, texts)
 
 
+async def _maybe_refresh_state() -> None:
+    """Re-probe the DB if startup state was no-index.
+
+    First-run UX fix (3.10 follow-up): a user installs Recall, configures
+    Claude Desktop, opens a conversation, gets told "run ``recall index``",
+    runs it in another terminal — without this refresh, the running
+    server process still holds the startup snapshot ``has_index=False``
+    and every subsequent tool call returns the no-index error until the
+    user restarts Claude Desktop. That's a launch-day UX cliff.
+
+    Behavior: if ``_state.has_index`` is True, do nothing (cached fast
+    path; ~0 cost). If False, take ``_state_lock``, double-check, re-run
+    ``compute_initial_state`` to pick up any index that has appeared
+    since startup. If the new state shows ``has_index=True``, atomically
+    swap ``_state`` and lazy-open the long-lived read-only DB connection.
+
+    Once ``has_index=True`` has been observed, refresh becomes a no-op
+    for the process lifetime — matches the existing "concurrent
+    indexer+server is unsupported" constraint (CLAUDE.md Q7). We don't
+    try to detect mid-session rebuild / salt rotation; that would
+    require closing + reopening ``_db_conn`` under contention with
+    in-flight tool calls, and is the user-visible reason the constraint
+    exists.
+    """
+    global _state, _db_conn
+    if _state is None or _state.has_index:
+        return  # cached fast path — no DB probe
+    assert _state_lock is not None, "_state_lock not initialized; call main() first"
+    async with _state_lock:
+        if _state.has_index:  # double-check after lock
+            return
+        new_state = compute_initial_state(
+            db_path=_state.db_path,
+            log_path=_state.log_path,
+            configured_model=_state.configured_model_name,
+        )
+        if new_state == _state:
+            return  # no change since last probe
+        _state = new_state
+        # has_index transitioning False → True is the case worth opening
+        # the connection for. (stale_model is orthogonal — handlers
+        # short-circuit on it before touching _db_conn, but we still
+        # open it to match the main() init path.)
+        if new_state.has_index and _db_conn is None:
+            _db_conn = connect_readonly(new_state.db_path)
+            _LOG.info(
+                "recall.server: state refreshed — index detected; "
+                "db connection opened (has_index=%s, stale_model=%s)",
+                new_state.has_index,
+                new_state.stale_model,
+            )
+        else:
+            _LOG.info(
+                "recall.server: state refreshed but still not ready (has_index=%s, stale_model=%s)",
+                new_state.has_index,
+                new_state.stale_model,
+            )
+
+
 def create_server() -> Server:
     """Construct the MCP Server with list_tools / call_tool handlers registered.
 
@@ -308,6 +380,10 @@ def create_server() -> Server:
 
     @server.call_tool()  # type: ignore[untyped-decorator]
     async def _call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
+        # First-run UX fix: re-probe the DB if startup state was no-index.
+        # Cached fast path when state.has_index is True (~0 cost).
+        await _maybe_refresh_state()
+
         # State is read at dispatch time, not captured at decorator-
         # registration time, so tests can swap module-level _state /
         # _db_conn between calls.
@@ -347,7 +423,7 @@ async def main() -> None:
     no startup byte ever reaches stdout (per the stdio-cleanliness
     invariant in this module's docstring).
     """
-    global _state, _db_conn, _embedder_lock
+    global _state, _db_conn, _embedder_lock, _state_lock
 
     db_path = _default_db_path()
     log_path = Path.home() / ".recall" / "logs"
@@ -360,15 +436,16 @@ async def main() -> None:
         _state.stale_model,
     )
 
-    # Open the long-lived read-only DB connection IF the index exists.
-    # When has_index is False, _db_conn stays None; tool handlers (3.10)
-    # check _state.has_index and return a structured error before
-    # touching _db_conn.
+    # Open the long-lived read-only DB connection IF the index exists at
+    # startup. When has_index is False, _db_conn stays None; the lazy
+    # refresh in _maybe_refresh_state opens it on the first tool call
+    # after the index becomes visible (first-run UX fix).
     if _state.has_index:
         _db_conn = connect_readonly(db_path)
         _LOG.info("recall.server: db connection opened (read-only)")
 
     _embedder_lock = asyncio.Lock()
+    _state_lock = asyncio.Lock()
 
     server = create_server()
 

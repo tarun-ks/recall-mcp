@@ -356,6 +356,17 @@ for orchestrating "clear → rotate → re-index." Mechanism vs. policy.
   error, not a stack trace.
 - Long operations (initial index) never run during tool calls. The server
   refuses to serve queries until the index exists; the CLI does the indexing.
+  **Lazy index-existence detection (3.10 follow-up).** When the server
+  boots before the index exists, it re-probes the DB on every tool call
+  *until* the index appears; once `has_index=True` is observed the
+  refresh becomes a no-op for the process lifetime. This fixes the
+  first-run UX where a user installs Recall, configures Claude Desktop,
+  is told "run `recall index`", does so in another terminal — without
+  this, every subsequent tool call would still return the no-index
+  error until the user restarted Claude Desktop. Stale-model detection
+  remains startup-only (model staleness requires a rebuild and is a
+  concurrent-indexer+server scenario which CLAUDE.md still flags as
+  unsupported).
 - **stdio transport must not write anything to stdout except MCP frames.**
   All logging goes to stderr (Phase 1) or `~/.recall/logs/recall.log`
   (added in Phase 3 by `server.py` as a rotating file handler). Until

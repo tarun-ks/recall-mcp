@@ -585,13 +585,37 @@ def index_cmd(
 
 @app.command(name="serve")
 def serve_cmd() -> None:
-    """Run the MCP stdio server. Lands in Phase 3 (Commit 3.9)."""
-    typer.secho(
-        "recall serve is not yet implemented (lands in Phase 3 — the MCP server).",
-        fg=typer.colors.YELLOW,
-        err=True,
-    )
-    raise typer.Exit(2)
+    """Run the MCP stdio server.
+
+    Reads stdin / writes stdout JSON-RPC frames. NO output goes to
+    stdout other than MCP frames — logging is configured via
+    ``recall.server.setup_logging`` to write to
+    ``~/.recall/logs/recall.log`` and stderr only.
+
+    Per the locked Phase 3 build order:
+      3.9  (this commit) — server skeleton, lifecycle, empty tools
+      3.10 — six tool implementations
+      3.11 — stdio cleanliness test suite
+      3.12 — pseudo-client + recorded-session-fixture replay
+      3.13 — manual smoke checklist + docs/clients-tested.md
+    """
+    # Lazy-import server module — it pulls the mcp SDK + sets up the
+    # async runner. `recall --help`, `recall eval`, `recall index`
+    # shouldn't pay this cost. Same lesson as the embedder lazy-import
+    # in 2.5.
+    import asyncio
+    from pathlib import Path
+
+    from recall.server import main as server_main
+    from recall.server import setup_logging
+
+    # Set up logging BEFORE constructing the Server — any log emission
+    # from transitive imports during server startup must already be
+    # routed to file/stderr, never stdout.
+    log_path = Path.home() / ".recall" / "logs"
+    setup_logging(log_path)
+
+    asyncio.run(server_main())
 
 
 def main() -> None:

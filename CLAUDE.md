@@ -963,13 +963,34 @@ don't get lost in chat history.
   back (semantic init/index/search currently dominates ~40 s of the
   total). Tag: tech-debt, performance, phase-2.
 
-  **Throughput-gate fallback chain** (if 2.7's gate fails after
-  iteration): (1) drop `naive` from `--ranker all` default — recall@5
-  = 0.0857 on nl2bash is the trivial-floor baseline, contributing
-  minimal evaluative signal; (2) bump
+  **Throughput-gate fallback chain** (if any all-rankers cumulative
+  gate fails after iteration): (1) drop `naive` from `--ranker all`
+  default — recall@5 = 0.0857 on nl2bash is the trivial-floor
+  baseline, contributing minimal evaluative signal; (2) bump
   `RECALL_EVAL_ALL_HARD_FAIL_S` to 720s with documented justification;
   (3) drop `fuzzy` as last resort — the 4× dogfood framing relies on
   fuzzy as the zsh+fzf comparison; dropping weakens v1 narrative.
+
+  **Status (2.7.5-hotfix):** option (1) executed. The hotfix's
+  deterministic-tie-breaking structural fix (full argsort vs
+  argpartition) adds ~57s to semantic's CI Linux runtime; pushed
+  cumulative wall-clock past the 600s ceiling. Dropped naive from
+  `_DEFAULT_RANKER_ORDER` in `cli.py`. `recall eval --ranker naive`
+  still works explicitly — it's just not on the default critical-
+  path eval. naive's calibrated 0.0857 baseline stays locked in the
+  ranker table; if it ever needs re-measurement (e.g. v1 README
+  rewrite, or a change suspected of affecting it), use explicit
+  `recall eval --ranker naive`. The path stays available; it's just
+  not on the default critical-path eval.
+
+  Options (2) and (3) remain unused. **Note:** the 2.7.5-hotfix
+  also bumped `RECALL_EVAL_ALL_HARD_FAIL_S` from 600s to **660s**
+  (not the chain option-2 emergency relief value of 720s). This is
+  separate-concern recalibration, not chain execution: the
+  structural-fix cost is permanent and non-reversible without
+  sacrificing determinism, so the ceiling reflects the new steady-
+  state honestly. Net post-hotfix Linux: ~537s baseline + ~120s
+  headroom against drift / future eval-lane additions.
 
   (Commit 2.7.5 — semantic search loop rewrite — was previously
   listed here as a deferred-items entry. Landed at 2.7.5 as a

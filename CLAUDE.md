@@ -189,14 +189,39 @@ pre-extension behavior, (c) the rationale is documented in the commit
 landing the addition. The 2.7 commit added `batch_size: int | None =
 None` under this rule. Future additions follow the same gate.
 
-**Performance contract (2.7).** Steady-state warm runtime targets on
-the eval lane (semantic ranker on nl2bash, corpus 10,624 / queries
-11,348):
+**Performance contract (2.7 → 2.7.5).** Steady-state warm runtime
+targets on the eval lane (semantic ranker on nl2bash, corpus 10,624
+/ queries 11,348):
 
-- M-series Mac (warm): **≤26s**
-- M-series Mac (first-shell-invocation, cold MPS): ≤26s — the MPS
+- M-series Mac (warm): **≤17s** at 2.7.5 (was ≤26s at 2.7; achieved
+  16.25s median post-2.7.5 via the sqlite-vec → numpy matmul
+  rewrite). Search stage dropped from 13.97s → 5.86s.
+- M-series Mac (first-shell-invocation, cold MPS): ≤17s — the MPS
   warmup at `Embedder.__init__` amortizes the kernel-compilation cost
-- GitHub-hosted Linux (CPU, no MPS): **deferred to 2.7.5** (see below)
+- GitHub-hosted Linux (CPU, no MPS): **≤220s** at 2.7.5 (was ≤260s
+  at 2.7 deferred; original ≤195s aspiration revised — see
+  "Architectural floor finding (2.7.5)" below). Achieved 219.47s on
+  CI verify branch: search stage 113.38s, down from 149.76s at 2.7
+  (−36.4s — the matmul win).
+
+**Architectural floor finding (2.7.5).** The original ≤195s Linux
+target assumed sqlite-vec MATCH overhead was ~80s of the 156s search
+stage. Empirically (CI verify branch) it was ~36s — matmul replacement
+saved 36s exactly, but the remaining 113s is encoder-bound (query
+encoding ~110s + matmul ~3s). Linux floor for 2.7.5's scope is
+therefore **~218s**: 5s init + 100s corpus encoding + 110s query
+encoding + 3s matmul. We landed at 219.47s, ~1.5s above the floor.
+**Below the floor is encoder territory** — different model,
+parallel/threaded encoding, or different runtime. Not 2.7.5's scope;
+not on 2.8's critical path either. The gate is updated to ≤220s to
+reflect the empirically-determined floor; further Linux throughput
+work would be its own commit if/when the cost becomes load-bearing.
+
+This is the second project-level "constraint surfacing" finding in
+two consecutive commits (2.7's platform-divergence finding was the
+first). Pattern: budget-tightening exposes the next dominant cost;
+naming it explicitly lets subsequent planning rounds inherit the
+right picture rather than re-discovering it.
 
 **M-series gate recalibration (≤24s → ≤26s).** Reflects the platform-
 divergence finding documented in §6 "Platform-divergent optimal batch
@@ -232,6 +257,29 @@ pins nl2bash semantic recall@5 to the bit-identical 2.5/2.6 baseline
 `0.44862530842439197` within `TOLERANCE=0.0001`. The test logs the
 delta on every run so a non-zero magnitude (float-noise from batching
 changes, etc.) is visible to reviewers even when the gate passes.
+
+**Equivalence-test contract (added 2.7.5).** Top-5 IDs from
+`SemanticRanker` (now pure numpy matmul + argpartition) are equal as
+a SET — not as an ordered list — to the sqlite-vec MATCH reference
+across all 11,348 nl2bash queries. List equality is NOT claimed
+because float32 cosine similarity permits ties (~0.34% of queries
+land different items at position 5 due to ties at the top-5
+boundary; 99.66% set-equal). The decision matrix in
+`tests/test_retrieve_semantic_equivalence.py` is the gate:
+
+| outcome | verdict |
+|---|---|
+| set equality holds + recall@5 ±0.0001 | algorithms equivalent (normal) |
+| set miss + recall@5 holds | tie reordering at top-5 boundary (acceptable; logged, not failed; capped at 5% divergence rate) |
+| recall@5 drift + set holds | impossible by construction (set equality implies same gold hits) |
+| both fail | real algorithmic bug |
+
+The fixture lives at `tests/fixtures/nl2bash_sqlite_vec_top5.json`
+and is the equivalence baseline. Regenerating it requires explicit
+reasoning about why the reference shifts (e.g. embedder model
+change, corpus change). The fixture's `_meta.provenance` field
+documents the SHA at which sqlite-vec was the eval reference;
+`test_fixture_provenance_is_pinned` enforces the metadata schema.
 
 ### 4b. Dedup salt and rebuild policy
 
@@ -767,6 +815,27 @@ accidentally collapse it. Specifically:
 - Do batch DB writes per embedding batch — one transaction per N rows
   amortizes commit cost while keeping memory bounded.
 
+**Eval vs production-indexer KNN divergence (added 2.7.5).** The
+search-time data structure differs by use case, even though the
+embedder and the corpus contents are shared:
+
+- **Eval path** (`recall.retrieve.semantic.SemanticRanker`):
+  source → embedder → in-memory numpy ndarray → matmul + argpartition.
+  No sqlite-vec, no DB. The corpus is held as `np.ndarray` and search
+  is one BLAS call. Eval workloads are small N (≤ ~50k), in-memory,
+  repeated across runs — pure-numpy simplicity wins.
+- **Production indexer path** (Commit 2.8, future): persistent on-disk
+  sqlite-vec virtual table for KNN over 50k+ commands across recall
+  invocations. Production workloads are large N, persistent storage,
+  single-query latency — sqlite-vec's on-disk index earns its keep
+  here. The 482 MB peak memory of full matmul on nl2bash would be
+  ~46 GB on a million-row corpus; chunking helps but persistent
+  KNN is the right primitive.
+
+Both paths share `Embedder`. They diverge below it. 2.8's planning
+round inherits this divergence as a given: don't try to unify the
+two; pick the right structure per layer.
+
 ## Deferred items (file as GitHub issues at end of Phase 1)
 
 These were called out and intentionally deferred. File them as GitHub
@@ -844,8 +913,24 @@ don't get lost in chat history.
   fuzzy as the zsh+fzf comparison; dropping weakens v1 narrative.
 
   (Commit 2.7.5 — semantic search loop rewrite — was previously
-  listed here as a deferred-items entry. Promoted to a first-class
-  build-order entry above; see "Phase 2 — core retrieval" → 2.7.5.)
+  listed here as a deferred-items entry. Landed at 2.7.5 as a
+  first-class build-order step; see "Phase 2 — core retrieval" → 2.7.5.)
+
+- **Chunked matmul for large eval workloads.** Phase 2-or-later,
+  performance. The 2.7.5 numpy implementation in
+  `SemanticRanker.search()` allocates the full
+  `(n_corpus, n_queries) × float32` similarity matrix in memory.
+  Current eval workloads are well under the threshold:
+  nl2bash 10,624 × 11,348 × 4 = **482 MB peak**; dogfood ≈ 1 KB;
+  open-source corpus (issue #13, planned ~1000 corpus × 100
+  queries) ≈ 400 KB. **Trigger condition: revisit when any single
+  eval workload approaches 1 GB peak memory budget.**
+
+  Chunking strategy when needed: compute
+  `corpus_emb @ query_emb_chunk.T` for chunks of ~1024 queries at
+  a time (≈ 40 MB intermediate). Trivially implementable; just
+  adds a Python loop around the existing matmul. No algorithmic
+  change. Tag: tech-debt, performance, phase-2-or-later.
 
 - **`HARD_RUNTIME_FAIL_S` default should be context-aware, not
   hardcoded in `run_eval()`.** Phase 2 cleanup. The current default

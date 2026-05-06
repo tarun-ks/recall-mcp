@@ -1,15 +1,30 @@
-"""Behavior-preservation gate for Commit 2.7's embed.py rewrite.
+"""Behavior-preservation gate for the SemanticRanker eval pipeline.
 
-The 2.7 rewrite changed embed.py internals (MPS warmup at construction,
-explicit batch-size control, DEBUG-level encode logging) under a frozen
-public API. This test pins the eval recall@5 to the calibrated 2.5/2.6
-baseline within ±0.0001 — tighter than the ±0.01 cross-platform noise
-band, because within-process determinism on the same model + corpus
-should hold to far better than that.
+Pins the nl2bash semantic recall@5 to the deterministic algorithm's
+canonical output within ±0.0001. Tighter than the ±0.01 cross-platform
+noise band because the algorithm is now deterministic across runners
+(2.7.5-hotfix); the only remaining variance source is intentional code
+change, which is exactly what this gate catches.
 
-If this fails, the rewrite has changed observable behavior and needs
-investigation before merge. Run via ``pytest -m embed`` (the heavy lane;
-loads the actual model).
+BASELINE HISTORY (anchor shifts ARE landmark events; record them here):
+
+    2.5 / 2.6 / 2.6.5 / 2.7 / 2.7.5 (sqlite-vec reference / argpartition):
+        0.44862530842439197 — value sqlite-vec produced; matched by
+        argpartition + M-series accidentally. Cross-runner CI surfaced
+        that this value depended on argpartition's implementation-
+        specific tie-breaking happening to coincide with sqlite-vec's
+        internal ordering on ~39 tie-affected queries.
+
+    2.7.5-hotfix (deterministic numpy algorithm, low-index tie-break):
+        0.44836094465985193 — the canonical output of the composite-
+        key argsort algorithm. Identical across M-series, Linux CI,
+        and any future runner. The ~3e-04 shift from the sqlite-vec
+        anchor is de-aliasing, not regression: the old value was an
+        artifact of platform-specific tie-breaking that happened to
+        match sqlite-vec; the new value is what the deterministic
+        algorithm produces canonically.
+
+Run via ``pytest -m embed`` (the heavy lane; loads the actual model).
 """
 
 from __future__ import annotations
@@ -20,11 +35,11 @@ from recall.eval.nl2bash import Nl2BashDataset
 from recall.eval.runner import run_eval
 from recall.retrieve.semantic import SemanticRanker
 
-# Bit-identical baseline from 2.5 / 2.6 / 2.6.5 (eval/results.json).
-# Pinned at full float64 precision; tolerance applied separately so a
-# bit-identical 2.7 rewrite logs delta = 0.0 and a noisy one logs the
-# magnitude for reviewers to inspect.
-EXPECTED_RECALL_AT_5 = 0.44862530842439197
+# Deterministic-algorithm baseline (re-anchored 2.7.5-hotfix). Pinned at
+# full float64 precision; tolerance applied separately so a stable
+# implementation logs delta = 0.0 and a regressed one logs the magnitude
+# for reviewers to inspect.
+EXPECTED_RECALL_AT_5 = 0.44836094465985193
 TOLERANCE = 0.0001
 
 

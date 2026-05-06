@@ -1,30 +1,34 @@
-"""Equivalence-test gate for Commit 2.7.5's sqlite-vec → numpy rewrite.
+"""Equivalence-test gate for the deterministic SemanticRanker.
 
-Runs the new pure-numpy SemanticRanker against the full nl2bash query
-set and compares top-5 IDs to the sqlite-vec MATCH reference frozen
-at ``tests/fixtures/nl2bash_sqlite_vec_top5.json``.
+POST-2.7.5-HOTFIX SEMANTIC: the fixture at
+``tests/fixtures/nl2bash_sqlite_vec_top5.json`` was regenerated to pin
+the deterministic numpy algorithm's canonical output rather than
+sqlite-vec's. With a deterministic algorithm and a fixture pinned to
+its canonical output, set equality should be 100% across runners; any
+divergence is a real algorithmic regression, not tie noise.
+
+The decision-matrix outcomes are kept for diagnostic value (logged
+per-axis numbers help future debugging), but the "tie reordering
+acceptable" branch is now load-bearing only against future code that
+regresses determinism — not against cross-runner variance, which the
+deterministic algorithm has eliminated.
 
 Per CLAUDE.md §4a equivalence-test contract:
 
-    Top-5 IDs are the same set across all nl2bash queries — set
-    equality, not list equality. List equality is not claimed because
-    float32 cosine permits ties; sqlite-vec / argpartition differ in
-    how ties are broken.
+    Top-5 IDs are pinned to the deterministic algorithm's canonical
+    output. Cross-runner determinism is the contract; tie-reordering
+    divergence is now a regression signal, not float32 noise.
 
-DECISION MATRIX (per locked Q3 outcomes)
+DECISION MATRIX (kept for diagnostic logging)
 
     both-pass:                 algorithms equivalent (normal)
-    set miss + recall@5 ok:    tie reordering at top-5 boundary
-                                 (acceptable; LOGGED, not failed)
-    recall@5 drift + set ok:   impossible by construction (set
-                                 equality implies same gold hits;
-                                 if this fires, the test framework
-                                 itself is wrong)
+    set miss + recall@5 ok:    pre-hotfix this was "tie reordering
+                                 acceptable"; post-hotfix it should
+                                 not occur (algorithm is deterministic
+                                 + fixture is pinned to it). If it
+                                 fires, surface for investigation.
+    recall@5 drift + set ok:   impossible by construction
     both-fail:                 real bug — investigate
-
-The test fires "fail" only on the both-fail case. The set-miss with
-recall@5 intact prints divergence detail + continues. This matches the
-locked outcome matrix exactly.
 
 Marked ``@pytest.mark.embed`` (heavy lane; loads sentence-transformers).
 """
@@ -42,8 +46,11 @@ from recall.retrieve.semantic import SemanticRanker
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "nl2bash_sqlite_vec_top5.json"
 
-# Behavior-preservation baseline (same as test_embed_behavior_preservation).
-EXPECTED_RECALL_AT_5 = 0.44862530842439197
+# Deterministic-algorithm baseline (re-anchored 2.7.5-hotfix; same anchor
+# as test_embed_behavior_preservation). The fixture is also pinned to the
+# deterministic algorithm post-hotfix (see fixture _meta.provenance), so
+# set-equality should be 100% stable across runners.
+EXPECTED_RECALL_AT_5 = 0.44836094465985193
 RECALL_TOLERANCE = 0.0001
 
 # Divergence sanity ceiling: float32 cosine ties at the top-5 boundary

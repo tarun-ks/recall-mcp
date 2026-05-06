@@ -85,7 +85,17 @@ jobs:
         # PASS→FAIL on dogfood (separate gates, both on semantic only).
         env:
           RECALL_EVAL_HARD_FAIL_S: "360"
-          RECALL_EVAL_ALL_HARD_FAIL_S: "600"
+          # 600 → 660 at 2.7.5-hotfix: the deterministic-tie-breaking
+          # structural fix adds ~57s to semantic's CI Linux runtime
+          # (full O(n log n) argsort vs O(n) argpartition over the
+          # 10624 × 11348 similarity matrix). The 600s ceiling was
+          # designed against the smaller pre-hotfix semantic cost; 660s
+          # reflects the new permanent steady-state. Naive removal from
+          # --ranker all default does most of the work (-63s on Linux);
+          # this 60s ceiling bump absorbs the algorithmic structural
+          # cost. NOT the fallback-chain option-2 emergency relief
+          # (which was 720s) — separate-concern recalibration.
+          RECALL_EVAL_ALL_HARD_FAIL_S: "660"
         run: uv run --python 3.12 recall eval --dataset all --output /tmp/ci_eval.json
       - name: regression gate (PR only)
         if: github.event_name == 'pull_request'

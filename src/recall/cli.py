@@ -61,9 +61,16 @@ _RANKER_FACTORIES: dict[str, Callable[[], Ranker]] = {
     "bm25": lambda: Bm25Ranker(),
     "fuzzy": lambda: FuzzyRanker(),
 }
+# `naive` was dropped from the default at 2.7.5-hotfix per the locked
+# throughput-gate fallback chain (CLAUDE.md "Eval all-rankers wall-clock
+# tension"). The deterministic-tie-breaking fix added ~57s to semantic's
+# CI Linux runtime; naive's recall@5 of 0.0857 (the trivial-floor
+# baseline) was locked into the calibrated table and contributes minimal
+# evaluative signal beyond what's already documented. `recall eval
+# --ranker naive` still works explicitly — it's just not on the default
+# critical-path eval that runs every CI cycle.
 _DEFAULT_RANKER_ORDER: tuple[str, ...] = (
     "semantic",
-    "naive",
     "token-overlap",
     "bm25",
     "fuzzy",

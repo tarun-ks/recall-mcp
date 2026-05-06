@@ -45,6 +45,15 @@ import numpy as np
 
 from recall.embed import Embedder
 
+# Score-precision rounding (2.7.5 hotfix). 5 decimals = 1e-5 precision;
+# 1000× finer than meaningful score differences, 100× coarser than BLAS
+# epsilon variance. See ``search()`` for the full rationale.
+_SCORE_ROUND_DECIMALS = 5
+# Index-tiebreaker scale. Must be << 10^-_SCORE_ROUND_DECIMALS so score
+# dominates, and >> float64 epsilon (~1e-16) so the perturbation isn't
+# rounded away. 1e-10 satisfies both for n_corpus up to ~10^5.
+_INDEX_SCALE = 1e-10
+
 
 class SemanticRanker:
     """``Ranker`` over a sentence-transformers embedder + numpy KNN."""
@@ -134,19 +143,52 @@ class SemanticRanker:
         # embedder pathology (rare; cheap insurance).
         assert np.isfinite(sims).all(), "embedder produced non-finite similarities"
 
-        # Top-k via argpartition + stable secondary argsort.
-        # kind="stable" ensures index-based tie-breaking; required for
-        # cross-platform reproducibility per the equivalence-test
-        # contract (CLAUDE.md §4a — set equality, not list equality).
+        # Top-k via deterministic composite-key argsort.
+        #
+        # CROSS-RUNNER DETERMINISM (CLAUDE.md "Composition is where bugs live"
+        # instance #8). The 2.7.5 verify-branch CI passed with delta = -1e-04;
+        # the post-merge main CI run on identical content landed at -2.6e-04
+        # — outside the ±0.0001 behavior-preservation tolerance. Root cause:
+        # two-stage variance composition.
+        #
+        #   (1) BLAS matmul rounding order produces tiny per-element variance
+        #       (~1e-7 on individual cosine scores) — different CI runners,
+        #       different thread interleavings, identical inputs.
+        #   (2) np.argpartition's "unspecified order among equal elements"
+        #       semantic amplifies that 1e-7 input variance into top-5 set
+        #       divergence at near-tied score boundaries — and that
+        #       propagates to recall@5 drift past the tolerance gate.
+        #
+        # Primitives correct in isolation (BLAS matmul, argpartition); the
+        # bug lives at the boundary. Fix: compose them differently.
+        #
+        # TWO-STEP STRUCTURAL FIX:
+        #   (a) Round sims to 5-decimal precision (1e-5). This is 1000×
+        #       finer than meaningful cosine score differences for
+        #       bge-small-en-v1.5 outputs (real ranking distinctions
+        #       happen at >= 1e-3 magnitudes), and 100× coarser than BLAS
+        #       epsilon variance. Below this granularity, score
+        #       differences are noise; above, signal.
+        #   (b) Stable argsort over a single composite key encoding
+        #       (-rounded_score, index). Index acts as a deterministic
+        #       tiebreaker; BLAS variance no longer reaches the ranking.
+        #
+        # Performance: full O(n log n) argsort instead of O(n)
+        # argpartition. nl2bash measured: ~+0.5s on M-series, well within
+        # the ≤17s gate. Worth the determinism.
         n_corpus = sims.shape[0]
-        if k >= n_corpus:
-            order = np.argsort(-sims, axis=0, kind="stable")
-            top = order[:n_corpus]
-        else:
-            partial = np.argpartition(-sims, k, axis=0)[:k, :]
-            top_scores = np.take_along_axis(sims, partial, axis=0)
-            order = np.argsort(-top_scores, axis=0, kind="stable")
-            top = np.take_along_axis(partial, order, axis=0)
+        sims_rounded = np.round(sims, decimals=_SCORE_ROUND_DECIMALS).astype(np.float32)
+        # Composite key per (corpus, query) cell:
+        #   primary:   -rounded_score   (ascending sort = best first)
+        #   secondary: index * INDEX_SCALE  (smaller index breaks ties)
+        # INDEX_SCALE * (n_corpus - 1) << 10^-_SCORE_ROUND_DECIMALS so
+        # score is the dominant key and index only matters on rounded
+        # ties. Float64 has ~1e-16 epsilon; INDEX_SCALE = 1e-10 is well
+        # above float64 noise and well below score precision.
+        indices_col = np.arange(n_corpus, dtype=np.float64).reshape(-1, 1)
+        composite = -sims_rounded.astype(np.float64) + indices_col * _INDEX_SCALE
+        order = np.argsort(composite, axis=0, kind="stable")
+        top = order[:k, :] if k < n_corpus else order
         # top: (k, n_queries) int64
 
         # Per-query result lists in input order, top-down.

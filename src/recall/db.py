@@ -212,15 +212,38 @@ def dedup_hash(salt: bytes, raw: str) -> bytes:
     return h.digest()
 
 
+def get_cursor(conn: sqlite3.Connection, source: str) -> int | None:
+    """Return the per-source incremental cursor (last-indexed wall-clock unix
+    seconds) for ``source``, or None if never indexed.
+
+    Convention (CLAUDE.md §2.8 indexer-cursor schema): meta key is
+    ``cursor_<source>``, e.g. ``cursor_zsh``. Adding a new source means
+    adding a new meta cursor key, not migrating existing data — older
+    sources' cursors are unaffected.
+    """
+    raw = get_meta(conn, f"cursor_{source}")
+    return None if raw is None else int(raw)
+
+
+def set_cursor(conn: sqlite3.Connection, source: str, ts: int) -> None:
+    """Update the per-source cursor to ``ts``. Caller wraps in a
+    transaction for atomicity with the row inserts the cursor advance
+    refers to (CLAUDE.md "Architectural seams": cursor advance and the
+    DB writes it represents must commit together)."""
+    set_meta(conn, f"cursor_{source}", str(ts))
+
+
 __all__ = (
     "DBError",
     "connect",
     "dedup_hash",
     "dedup_salt",
+    "get_cursor",
     "get_meta",
     "migrate",
     "rotate_dedup_salt",
     "schema_version",
+    "set_cursor",
     "set_meta",
     "transaction",
 )

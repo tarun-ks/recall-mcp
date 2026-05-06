@@ -129,6 +129,23 @@ expose exactly one method:
 - Sources are stateless across calls. Each `iter_entries` opens whatever
   file or DB it needs and closes when the iterator is exhausted.
 
+**Indexer cursor schema (added 2.8).** The indexer stores per-source
+incremental cursors in the `meta` table under keys named
+`cursor_<source>` — e.g. `cursor_zsh`, `cursor_bash`, `cursor_atuin`.
+Each value is the wall-clock unix-second timestamp of the last entry
+successfully committed for that source. **Adding a new source means
+adding a new `cursor_<name>` key, not migrating existing data** —
+older sources' cursors are unaffected; the new source starts at None
+(== "from the beginning").
+
+The cursor advances atomically with the row inserts it represents
+(within the same transaction). On crash mid-batch, the cursor stays
+at the last successfully committed batch's max ts — the next
+indexing run re-processes only entries the previous run hadn't
+committed. Entries with `ts = 0` (unknown timestamp) are always
+yielded by sources regardless of cursor and never advance the cursor;
+the `UNIQUE(source, text_hash, ts)` constraint backstops dedup.
+
 ### 3. atuin schema robustness
 
 Open the user's atuin database with `?mode=ro&immutable=1` so we never write
@@ -351,7 +368,14 @@ for orchestrating "clear → rotate → re-index." Mechanism vs. policy.
 
 - Cold start (model load + db open): < 2 s on M-series Mac
 - Single semantic query over 50k commands: < 100 ms p95
-- Initial index of 50k commands: < 60 s
+- Initial index of 50k commands: < 60 s **on M-series Mac only**
+  (added 2.8). Indexer is encode-bound on Linux per the 2.7
+  platform-divergence finding; Linux indexing throughput is bounded
+  by Embedder throughput, which is itself constrained by the
+  platform-balanced batch=64 default (CLAUDE.md §6 "Platform-divergent
+  optimal batch sizes"). Linux empirical number recorded post-impl;
+  no Linux gate enforced — the constraint chain runs through the
+  Embedder, not the indexer.
 - Eval harness (`recall eval --dataset nl2bash`): ≤ 60 s on M-series Mac
   (target). Soft warning printed at 90 s; hard fail (raised by the harness
   itself, not just CI) at 120 s. The hard fail makes the runtime gate live
@@ -370,6 +394,15 @@ M-series; the MPS warmup at `Embedder.__init__` (added 2.7) amortizes
 this so user-facing first-call latency reflects the steady-state
 number. CI Linux has no MPS warmup cost; the warmup call is a fast
 no-op there.
+
+**CI runner-to-runner variance (added 2.8).** Semantic CI Linux runtime
+exhibits **~15-20% runner-to-runner variance** (observed range
+230-276s across three runs as of 2.8). Budgets are sized against the
+upper end; single-run shifts within this range are noise, not
+regression. **Future commits with retrieval changes should expect
+40-50s variance per run** and not over-react to one number. If you need
+a real signal on whether a change moved the bar, run CI 3+ times and
+look at the median, not a single point.
 
 **Platform-divergent optimal batch sizes (2.7 finding).** Optimal
 batch size diverges by platform: M-series MPS prefers batch=128
@@ -523,8 +556,23 @@ arbitrary direction — see "Phase 2 gating rules" below)*
       before 2.8 starts** — indexer adds eval-lane content that
       compounds existing CI pressure.
 - 2.8 Indexer: `HistorySource` → scrubber → embedder → DB write,
-      respecting the architectural seam
-- 2.9 Hybrid search (vector + FTS5 with RRF k=60)
+      respecting the architectural seam. Per-source ts cursor in
+      `meta`; 1024-row indexer batches feeding the embedder's
+      internal batch_size=64; `--rebuild` does DROP + CREATE
+      (well-tested vec0 reset path); `--new-salt` requires `--rebuild`.
+      Adversarial scrubber-integration test asserts zero secret-pattern
+      matches in `commands.text_scrubbed` after indexing the
+      synthetic-secrets corpus. **Indexer is consumer-less until Phase
+      3's MCP server lands** — integration tests verify DB-layer
+      correctness; user-facing round-trip ("index → search via MCP
+      tool") is gated on Phase 3 and added then.
+- 2.9 Hybrid search (vector + FTS5 with RRF k=60). **Sequencing
+      question deferred to surface after 2.8 ships**: hybrid is
+      marginal-gain given current 1.11×/4× recall numbers; Phase 3
+      MCP server is the delivered product. Decision pending after
+      2.8 produces actual indexer behavior to inform: should 2.9
+      ship before Phase 3, or can Phase 3 v1 ship with vector-only
+      and 2.9 land as v1.1?
 
 **Phase 3 — MCP surface**
 - 3.9  `server.py` + `tools.py` with the six tools

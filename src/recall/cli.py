@@ -455,14 +455,132 @@ def eval_cmd(
 
 
 @app.command(name="index")
-def index_cmd() -> None:
-    """Index shell history into the local SQLite store. Lands in Commit 2.8."""
-    typer.secho(
-        "recall index is not yet implemented (lands in Commit 2.8 — the indexer).",
-        fg=typer.colors.YELLOW,
-        err=True,
-    )
-    raise typer.Exit(2)
+def index_cmd(
+    source: Annotated[
+        str,
+        typer.Option(
+            help="Source(s) to index: all | zsh | bash | atuin. "
+            "Default 'all' indexes every available source sequentially. "
+            "Sources without a usable history (e.g. atuin not installed) "
+            "are skipped with a warning."
+        ),
+    ] = "all",
+    rebuild: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild",
+            help="Drop and re-create commands/commands_vec/commands_fts before "
+            "indexing (CLAUDE.md §4b). Salt preserved unless --new-salt also "
+            "passed. Cursor metas reset; all sources re-index from scratch.",
+        ),
+    ] = False,
+    new_salt: Annotated[
+        bool,
+        typer.Option(
+            "--new-salt",
+            help="Rotate the dedup salt (CLAUDE.md §4b). Requires --rebuild — "
+            "rotating the salt without rebuilding leaves old-salt and new-salt "
+            "hashes coexisting in one table, silently breaking dedup.",
+        ),
+    ] = False,
+) -> None:
+    """Index shell history into the local SQLite store at ``~/.recall/db.sqlite``.
+
+    Pulls entries from each source's ``iter_entries`` (incremental from
+    the per-source cursor in meta), runs each through the scrubber,
+    embeds the scrubbed text via ``Embedder``, and writes
+    (text_scrubbed, text_hash, vector, metadata) rows in 1024-row
+    transactions (CLAUDE.md §2.8).
+    """
+    # Lazy-import indexer + sources here (not at module top) to keep
+    # `recall --help`, `recall eval`, and pytest collection from paying
+    # the model-load cost when the user just wanted the eval lane.
+    # Same lesson as Embedder's lazy sentence-transformers import in 2.5.
+    import logging
+
+    from recall.db import connect, migrate, rotate_dedup_salt
+    from recall.embed import Embedder
+    from recall.indexer import index_sources
+    from recall.indexer import rebuild as do_rebuild
+    from recall.sources.atuin import AtuinSchemaError, AtuinSource
+    from recall.sources.base import HistorySource
+    from recall.sources.bash import BashSource
+    from recall.sources.zsh import ZshSource
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+
+    if new_salt and not rebuild:
+        typer.secho(
+            "--new-salt without --rebuild is rejected: rotating the salt without "
+            "rebuilding leaves old-salt and new-salt hashes coexisting in one "
+            "table, silently breaking dedup. Pass --rebuild together.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    valid_sources = {"all", "zsh", "bash", "atuin"}
+    if source not in valid_sources:
+        typer.secho(
+            f"unknown source: {source!r}; expected one of {sorted(valid_sources)}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    conn = connect()
+    migrate(conn)
+
+    if rebuild:
+        if new_salt:
+            rotate_dedup_salt(conn)
+        do_rebuild(conn)
+
+    # Resolve sources. Each source factory either returns a ready-to-use
+    # HistorySource or raises (missing histfile, atuin not installed, etc.)
+    # in which case we skip it with a warning. Sequential per Q3.
+    requested = [source] if source != "all" else ["zsh", "bash", "atuin"]
+    active: list[HistorySource] = []
+    for name in requested:
+        try:
+            if name == "zsh":
+                active.append(ZshSource())
+            elif name == "bash":
+                active.append(BashSource())
+            elif name == "atuin":
+                active.append(AtuinSource())
+        except (FileNotFoundError, AtuinSchemaError) as e:
+            typer.secho(
+                f"skipping {name}: {e}",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+
+    if not active:
+        typer.secho(
+            "no usable sources found. Did the histfiles get nuked?",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    typer.echo(f"recall index: sources={[s.name for s in active]} rebuild={rebuild}")
+
+    embedder = Embedder()
+    result = index_sources(conn, active, embedder=embedder)
+
+    typer.echo("")
+    typer.echo("=== Indexing summary ===")
+    typer.echo(f"  inserted:           {result.inserted}")
+    typer.echo(f"  skipped (dedup):    {result.skipped_dedup}")
+    typer.echo(f"  total processed:    {result.total_processed()}")
+    typer.echo("  by source:")
+    for src, n in result.by_source.items():
+        typer.echo(f"    {src:<8} {n}")
+    typer.echo("")
+    typer.echo(f"  runtime:            {result.runtime_seconds:.2f}s")
+    typer.echo(f"    embedder:         {result.embedder_seconds:.2f}s")
+    typer.echo(f"    db writes:        {result.db_write_seconds:.2f}s")
 
 
 @app.command(name="serve")

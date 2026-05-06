@@ -566,18 +566,30 @@ arbitrary direction — see "Phase 2 gating rules" below)*
       3's MCP server lands** — integration tests verify DB-layer
       correctness; user-facing round-trip ("index → search via MCP
       tool") is gated on Phase 3 and added then.
-- 2.9 Hybrid search (vector + FTS5 with RRF k=60). **Sequencing
-      question deferred to surface after 2.8 ships**: hybrid is
-      marginal-gain given current 1.11×/4× recall numbers; Phase 3
-      MCP server is the delivered product. Decision pending after
-      2.8 produces actual indexer behavior to inform: should 2.9
-      ship before Phase 3, or can Phase 3 v1 ship with vector-only
-      and 2.9 land as v1.1?
+- 2.9 Hybrid search (vector + FTS5 with RRF k=60) — **DEFERRED TO
+      v1.1.** Original Phase 2 plan put this before Phase 3; at 2.8
+      closure the decision was to defer based on (a) 4× dogfood and
+      1.11× nl2bash semantic-only deltas suggesting hybrid is
+      marginal-gain, (b) Phase 3 produces actual user-feedback data
+      that should inform whether hybrid is worth shipping, (c) v1's
+      launch story doesn't depend on it. See deferred-items entry
+      "2.9 hybrid search" for the v1.1 implementation framing.
 
-**Phase 3 — MCP surface**
-- 3.9  `server.py` + `tools.py` with the six tools
-- 3.10 stdout-cleanliness test
-- 3.11 End-to-end MCP test (spawn, initialize, tool calls, assertions)
+**Phase 3 — MCP surface (5-commit split, locked Phase-3 §10)**
+- 3.9  Server skeleton: lifecycle, DB read-only connection, embedder
+       lazy-load, stale-index check, empty tool registry. The MCP
+       protocol bootstraps (initialize, list_tools=[]); no tools yet.
+- 3.10 Six tool implementations + Pydantic input/output schemas
+       (CommandHit, SequenceHit, CommandStats per locked Q2). Adds
+       runtime stdout-redirect defense around embedder.encode.
+- 3.11 stdio cleanliness test suite: subprocess test + ruff T201 +
+       custom AST check. Cold-cache stress case included. Runs on
+       every PR + main push + scheduled daily CI.
+- 3.12 Pseudo-client + recorded-session-fixture replay tests.
+       Includes "long idle, then tool call" recorded scenario.
+- 3.13 Manual smoke-test checklist + docs/clients-tested.md
+       (Claude Desktop macOS+Windows, Cursor macOS, Zed macOS,
+       Cline VS Code macOS). The v1 launch-readiness gate.
 
 **Phase 4 — polish**
 - 4.12 README with GIF, install, demo, benchmark table
@@ -1071,6 +1083,31 @@ don't get lost in chat history.
   context-aware (e.g. detect CI via env var, scale by available
   cores, or have the harness sample one rapid eval and infer a
   budget). Tag: tech-debt, ci, eval-quality.
+- **2.9 hybrid search (vector + FTS5 with RRF k=60)** — deferred from
+  v1 to v1.1. Original Phase 2 plan included this commit before Phase
+  3; the 2.8 closure decision was to defer based on (a) 4× dogfood and
+  1.11× nl2bash semantic-only deltas suggesting hybrid is marginal-
+  gain, (b) Phase 3 producing actual user-feedback data that should
+  inform whether hybrid is worth shipping, (c) v1 launch story not
+  requiring it. v1.1 work begins after launch with real user query
+  data informing the implementation. Tag: phase-2-deferred,
+  post-launch.
+- **Document first-call latency in README** — Phase 4 README content.
+  The MCP server lazy-loads the embedder on first tool call (~5s for
+  model load + MPS warmup); subsequent calls are fast. Document this
+  under "Expected behavior on first use" in the README's getting-
+  started section so users don't mistake the first-call delay for a
+  hang. Tag: documentation, pre-launch.
+- **Revisit `@server.list_tools()` type-ignore in `src/recall/server.py`
+  when mcp ships full type stubs (likely v1.x).** Currently necessary
+  due to SDK 1.27 stub incompleteness — the decorator-based
+  handler-registration pattern returns Any, which mypy strict mode
+  flags as no-untyped-call / untyped-decorator. The pattern is correct
+  SDK usage; the type-ignore is targeted (`no-untyped-call,
+  untyped-decorator`) and limited to the single decorator line. When
+  the SDK ships type stubs, drop the ignore and the corresponding
+  ``[[tool.mypy.overrides]]`` block in ``pyproject.toml``. Not blocking.
+  Tag: tech-debt, low-priority.
 - **Real-history scrubber validation as a v1 README claim** —
   Phase 4 README content. The 2026-05-04 dogfood-prep audit caught
   53 real secrets (URL userinfo + JWTs) across 1800 lines of real

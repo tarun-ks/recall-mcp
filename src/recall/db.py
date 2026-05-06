@@ -87,6 +87,34 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def connect_readonly(path: Path | None = None) -> sqlite3.Connection:
+    """Open the recall DB read-only. The MCP server (Phase 3) is the
+    only intended caller — the indexer and CLI use ``connect()``.
+
+    Uses sqlite's URI form with ``?mode=ro&immutable=1`` so the connection
+    can never write. Fails with ``DBError`` if the DB doesn't exist
+    (caller is responsible for the no-index error path).
+
+    ``PRAGMA query_only = ON`` is belt-and-suspenders against the
+    URI-mode-ro contract being silently relaxed by some sqlite-vec
+    operation. Together they guarantee the MCP server cannot mutate
+    state — important for the architectural separation where the
+    indexer is the only writer.
+    """
+    db_path = path if path is not None else _default_db_path()
+    if not db_path.exists():
+        raise DBError(
+            f"Index not found at {db_path}. Run 'recall index' to build one "
+            "from your shell history."
+        )
+    uri = f"file:{db_path}?mode=ro&immutable=1"
+    conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    _load_sqlite_vec(conn)
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
 def schema_version(conn: sqlite3.Connection) -> int:
     row = conn.execute("PRAGMA user_version").fetchone()
     return int(row[0])
@@ -236,6 +264,7 @@ def set_cursor(conn: sqlite3.Connection, source: str, ts: int) -> None:
 __all__ = (
     "DBError",
     "connect",
+    "connect_readonly",
     "dedup_hash",
     "dedup_salt",
     "get_cursor",

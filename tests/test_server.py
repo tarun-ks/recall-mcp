@@ -175,8 +175,8 @@ def test_create_server_returns_mcp_server() -> None:
     assert hasattr(s, "get_capabilities")
 
 
-def test_list_tools_returns_empty_in_3_9() -> None:
-    """3.9 ships with zero tools; 3.10 adds them.
+def test_list_tools_returns_the_six_tools() -> None:
+    """3.10 ships the locked six-tool surface (CLAUDE.md "MCP tool surface").
 
     Find the registered list_tools handler and call it. The SDK stores
     request handlers in ``server.request_handlers``, keyed by request type;
@@ -193,7 +193,20 @@ def test_list_tools_returns_empty_in_3_9() -> None:
     result = asyncio.run(handler(req))
     # Result is a ServerResult wrapping a ListToolsResult.
     tools = result.root.tools
-    assert tools == []
+    names = [t.name for t in tools]
+    assert names == [
+        "search",
+        "find_in_project",
+        "commands_after",
+        "failed_recently",
+        "command_stats",
+        "recent",
+    ]
+    # Each tool advertises its inputSchema (used by the MCP client for
+    # client-side validation before dispatch).
+    for t in tools:
+        assert t.inputSchema is not None
+        assert "properties" in t.inputSchema
 
 
 # === get_embedder (refinement 1) ===

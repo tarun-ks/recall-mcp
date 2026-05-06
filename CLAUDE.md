@@ -364,6 +364,22 @@ for orchestrating "clear → rotate → re-index." Mechanism vs. policy.
   sends `initialize`, and asserts every line on stdout is a valid MCP
   JSON-RPC frame.
 
+**Static-pipe smoke testing finding (3.10).** Smoke testing via
+`echo '{...}' | recall serve` drops the trailing frame when stdin
+EOFs before the SDK drains queued requests. Symptom: pipe N frames,
+get N-1 responses; the last `tools/call` (or whichever is last)
+gets no reply. **This is NOT a recall bug** — real MCP clients
+(Claude Desktop, Cursor, Zed, Cline) hold stdin open across the
+session and never hit this. But anyone debugging via static-pipe
+input WILL hit it and assume the server crashed. Fix: insert
+`sleep 0.2` between echoed frames + `sleep 0.5` at the end. The
+helper script in `tests/manual_smoke.md` already does this; cross-
+reference it when debugging "the tools/call disappeared." Do not
+treat this as a stdio-cleanliness invariant violation — the SDK is
+correctly draining what it sees; the bug is in the static-pipe
+test harness's premise that stdin can EOF immediately and frames
+will still be processed.
+
 ### 6. Performance budgets (CI-enforced, Phase 3+)
 
 - Cold start (model load + db open): < 2 s on M-series Mac
@@ -934,26 +950,108 @@ accidentally collapse it. Specifically:
 - Do batch DB writes per embedding batch — one transaction per N rows
   amortizes commit cost while keeping memory bounded.
 
-**Eval vs production-indexer KNN divergence (added 2.7.5).** The
-search-time data structure differs by use case, even though the
-embedder and the corpus contents are shared:
+## Eval vs production retrieval architectures
+
+This is a fundamental architectural seam in the codebase. Eval and
+production share `Embedder` but diverge below it. Future contributors
+need to find this section discoverably — recall has TWO retrieval
+paths, not one.
+
+**Both paths share** `recall.embed.Embedder` (the public-API contract
+frozen at Commit 2.5; CLAUDE.md §4a). The encode call is identical;
+the corpus contents are scrubbed text from the same `commands` table.
+
+**They diverge on the search-time data structure:**
 
 - **Eval path** (`recall.retrieve.semantic.SemanticRanker`):
-  source → embedder → in-memory numpy ndarray → matmul + argpartition.
-  No sqlite-vec, no DB. The corpus is held as `np.ndarray` and search
-  is one BLAS call. Eval workloads are small N (≤ ~50k), in-memory,
-  repeated across runs — pure-numpy simplicity wins.
-- **Production indexer path** (Commit 2.8, future): persistent on-disk
-  sqlite-vec virtual table for KNN over 50k+ commands across recall
+  source → embedder → in-memory numpy ndarray → matmul + composite-
+  key argsort. No sqlite-vec, no DB. The corpus is held as
+  `np.ndarray` and search is one BLAS call. Eval workloads are small
+  N (≤ ~50k), in-memory, repeated across runs — pure-numpy
+  simplicity wins. Tie-breaking is deterministic (composite-key
+  argsort over rounded scores; CLAUDE.md §4a "Tie-breaking
+  convention") — equivalence-test fixture pins this output.
+- **Production path** (`recall.tools._handle_search`,
+  `recall.tools._semantic_topk`): tools call sqlite-vec MATCH
+  directly via SQL on the long-lived read-only DB connection.
+  Persistent on-disk vec0 virtual table holds 50k+ commands across
   invocations. Production workloads are large N, persistent storage,
   single-query latency — sqlite-vec's on-disk index earns its keep
   here. The 482 MB peak memory of full matmul on nl2bash would be
-  ~46 GB on a million-row corpus; chunking helps but persistent
-  KNN is the right primitive.
+  ~46 GB on a million-row corpus.
 
-Both paths share `Embedder`. They diverge below it. 2.8's planning
-round inherits this divergence as a given: don't try to unify the
-two; pick the right structure per layer.
+**Don't try to unify the two.** Specifically:
+
+- Don't reuse `SemanticRanker` from inside the MCP tools — its
+  in-memory numpy structure doesn't survive across server restarts
+  and would bloat memory on real-history-sized corpora.
+- Don't reach for sqlite-vec MATCH inside the eval lane — its
+  per-query overhead dominates encode for small N and adds DB
+  setup cost the eval doesn't need.
+- Don't pin the eval-equivalence fixture to sqlite-vec's tie-break
+  output — sqlite-vec's tie ordering is implementation-specific
+  and not stable across versions; pin to the deterministic numpy
+  algorithm's canonical output (CLAUDE.md §4a "De-aliasing
+  sub-note (2.7.5-hotfix iteration finding)").
+
+**Cross-runner determinism is an eval-lane concern only.** The 2.7.5-
+hotfix structural fix (composite-key argsort with score rounding to
+1e-5) makes the eval-lane semantic ranker deterministic across CI
+runners. Production tools call sqlite-vec MATCH, which has its own
+tie-breaking convention (implementation-specific, ANN-style); we do
+not attempt to assert cross-runner determinism on the production
+path. The MCP tools' result-quality gate is end-to-end (manual
+smoke + 3.13 client-tested matrix + 3.12 recorded-session replay),
+not a numeric equivalence test against a fixture.
+
+## Architectural seams
+
+**source → indexer (streaming OK) → embedder (must batch) → DB write (per-batch).**
+
+Atuin reader streams via cursor, so a million-row atuin DB doesn't blow up
+memory. Good. But the embedding step in Phase 2 can't stream — it batches.
+Worth knowing the architectural seam: source → indexer (streaming OK) →
+embedder (must batch) → DB write (per-batch).
+
+When designing Phase 2 (Commits 2.5–2.8), respect this seam: don't
+accidentally collapse it. Specifically:
+
+- Don't `list(source.iter_entries())` upfront — sources are streaming for
+  a reason; eagerly materializing kills the memory advantage on large
+  atuin DBs.
+- Don't embed one entry at a time — sentence-transformers wants batches
+  (typically 32–64) for throughput; the per-call overhead dominates
+  otherwise. That's the throughput cliff.
+- Do batch DB writes per embedding batch — one transaction per N rows
+  amortizes commit cost while keeping memory bounded.
+
+## MCP tool error taxonomy (added 3.10)
+
+Tools (`src/recall/tools.py`) surface five distinct error classes,
+each with a stable user-facing message and a JSON-RPC code on the
+wire. The taxonomy is locked so future tools follow the same pattern:
+
+| error class | trigger | wire shape | JSON-RPC code |
+| --- | --- | --- | --- |
+| **state: no_index** | `ServerState.has_index == False` | `CallToolResult(isError=true)`, content text = `no_index_msg(db_path)` | n/a (in-band) |
+| **state: stale_model** | `ServerState.stale_model == True` | `CallToolResult(isError=true)`, content text = `stale_model_msg(...)` | n/a (in-band) |
+| **state: no_atuin_source** | `failed_recently` called but no `commands.source = 'atuin'` rows | `CallToolResult(isError=true)`, fixed message | n/a (in-band) |
+| **state: cwd_context_missing** | `find_in_project` and no cwd resolvable | `CallToolResult(isError=true)`, fixed message | n/a (in-band) |
+| **input: validation** | Pydantic ValidationError or `_check_pattern_safe` ValueError or `_parse_since`/`_parse_window` ValueError | `CallToolResult(isError=true)`, content text = compressed validator message | n/a (in-band) |
+| **internal: unexpected** | uncaught Exception in handler body | raised `McpError(INTERNAL_ERROR=-32603)` | -32603 |
+| **internal: unknown tool** | tool name not in HANDLERS dict | raised `McpError(INVALID_PARAMS=-32602)` | -32602 |
+
+**State errors return `isError=true` in-band, not as JSON-RPC errors.**
+Reason: the MCP client UI typically renders in-band tool errors more
+gracefully than JSON-RPC protocol errors, and these state failures are
+expected (no index → user runs `recall index`); they're application-
+level, not protocol-level. JSON-RPC error codes are reserved for
+genuine protocol/internal failures the client shouldn't try to
+recover from in-line.
+
+When adding a new tool: pick the closest existing class. New error
+classes need a new row here AND a corresponding handler in
+`recall.tools.dispatch_tool`.
 
 ## Deferred items (file as GitHub issues at end of Phase 1)
 

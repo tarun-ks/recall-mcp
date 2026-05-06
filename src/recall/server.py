@@ -3,8 +3,8 @@
 Phase 3 lands the MCP server in five commits:
 
     3.9  Server skeleton: lifecycle, DB connection, embedder lazy-load,
-         stale-index check, empty tool registry. (this commit)
-    3.10 Six tool implementations + Pydantic input/output schemas.
+         stale-index check, empty tool registry.
+    3.10 Six tool implementations + Pydantic input/output schemas. (this commit)
     3.11 stdio cleanliness test suite (subprocess + ruff T201 + AST + runtime).
     3.12 Pseudo-client + recorded-session-fixture replay tests.
     3.13 Manual smoke-test checklist + docs/clients-tested.md.
@@ -44,23 +44,27 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import logging.handlers
 import os
 import sqlite3
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import mcp.server.stdio
 from mcp.server import InitializationOptions, NotificationOptions, Server
-from mcp.types import Tool
+from mcp.types import CallToolResult, TextContent, Tool
 
 from recall.db import DBError, _default_db_path, connect_readonly, get_meta
 from recall.embed import DEFAULT_MODEL
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from recall.embed import Embedder
 
 _LOG = logging.getLogger("recall.server")
@@ -228,9 +232,8 @@ async def get_embedder() -> Embedder:
     return the cached instance. The double-checked-locking pattern
     handles concurrent first calls cleanly.
 
-    Per Q4.2: ``_embedder_lock`` also serializes encode calls in the
-    ``encode_async`` helper that lands 3.10 — this function only
-    handles construction.
+    Per Q4.2: ``_embedder_lock`` also serializes encode calls in
+    ``encode_async`` — this function only handles construction.
     """
     global _embedder
     if _embedder is not None:
@@ -251,13 +254,49 @@ async def get_embedder() -> Embedder:
     return _embedder
 
 
-def create_server() -> Server:
-    """Construct the MCP Server with handlers registered.
+def _encode_with_redirect(embedder: Embedder, texts: Sequence[str]) -> np.ndarray:
+    """Run ``embedder.encode`` with stdout redirected to stderr.
 
-    3.9 ships an empty tool registry — ``list_tools`` returns ``[]``.
-    3.10 adds the six tools via ``@server.call_tool`` decorators on
-    handler functions.
+    The runtime defense against the stdio-cleanliness invariant
+    (CLAUDE.md §5): if any library transitively pulled by
+    sentence-transformers / torch decides to ``print()`` during encode
+    (HuggingFace progress, MPS warnings, future SDK regressions),
+    those bytes go to stderr instead of corrupting MCP framing on
+    stdout. The unit-tested defense (``setup_logging`` + the runtime
+    gate) covers logging; this covers everything else that bypasses
+    logging and writes raw bytes.
     """
+    with contextlib.redirect_stdout(sys.stderr):
+        return embedder.encode(texts)
+
+
+async def encode_async(texts: Sequence[str]) -> np.ndarray:
+    """Encode ``texts`` asynchronously; serialize via the embedder lock.
+
+    Q4.2 architecture: ``asyncio.to_thread`` keeps the event loop free
+    while the C/MPS encode runs; ``_embedder_lock`` serializes calls
+    so the underlying model — which is NOT thread-safe on MPS — never
+    sees concurrent encodes. First call lazy-loads the embedder.
+    """
+    assert _embedder_lock is not None, "_embedder_lock not initialized; call main() first"
+    embedder = await get_embedder()
+    async with _embedder_lock:
+        return await asyncio.to_thread(_encode_with_redirect, embedder, texts)
+
+
+def create_server() -> Server:
+    """Construct the MCP Server with list_tools / call_tool handlers registered.
+
+    Tools and handlers live in ``recall.tools``; this module wires them
+    into the SDK and supplies the runtime dependencies (``state``,
+    ``db_conn``, ``encode_async``).
+    """
+    # Lazy import: tools.py imports pydantic + numpy. Keeping the import
+    # inside create_server() (which is called at server startup, not at
+    # module import) preserves the import-time discipline tested in
+    # test_server.test_server_module_does_not_pull_torch_at_import_time.
+    from recall import tools as _tools
+
     server: Server = Server(_SERVER_NAME, version=_SERVER_VERSION)
 
     # mcp SDK 1.27 doesn't fully type its decorator-based handler-registration
@@ -265,8 +304,37 @@ def create_server() -> Server:
     # — the type-ignores quiet mypy until the SDK ships better stubs.
     @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
     async def _list_tools() -> list[Tool]:
-        # 3.10 will populate this with the six tools.
-        return []
+        return list(_tools.TOOLS)
+
+    @server.call_tool()  # type: ignore[untyped-decorator]
+    async def _call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
+        # State is read at dispatch time, not captured at decorator-
+        # registration time, so tests can swap module-level _state /
+        # _db_conn between calls.
+        assert _state is not None, "server state not initialized; main() must run first"
+
+        payload, _count, is_error = await _tools.dispatch_tool(
+            name,
+            arguments,
+            state=_state,
+            db_conn=_db_conn,
+            encode=encode_async,
+        )
+        # Build the CallToolResult ourselves: we want both structured
+        # content (for clients that surface JSON) and a TextContent block
+        # (for the human-readable display). The SDK auto-wraps dicts but
+        # forces the TextContent to be a JSON dump; for error-payloads
+        # we want the message itself in TextContent so it renders cleanly
+        # in the client UI.
+        if is_error and "error" in payload:
+            text = payload["error"]
+        else:
+            text = json.dumps(payload, indent=2)
+        return CallToolResult(
+            content=[TextContent(type="text", text=text)],
+            structuredContent=payload,
+            isError=is_error,
+        )
 
     return server
 
@@ -323,6 +391,7 @@ __all__ = (
     "ServerState",
     "compute_initial_state",
     "create_server",
+    "encode_async",
     "get_embedder",
     "main",
     "setup_logging",

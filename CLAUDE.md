@@ -391,6 +391,70 @@ correctly draining what it sees; the bug is in the static-pipe
 test harness's premise that stdin can EOF immediately and frames
 will still be processed.
 
+**stdio-cleanliness CI lane (3.11).** A dedicated `stdio` lane runs
+on every PR + main push + daily 06:00 UTC, exercising:
+- subprocess test A: initialize-only round-trip (cleanliness w/o tool dispatch)
+- subprocess test C: tools/call recent against empty DB (dispatch isolation)
+- subprocess test D: cold-cache tools/call search (the marquee test —
+  forces fresh HF model download via empty `HF_HOME`, asserts no
+  library progress bars or load messages leak to stdout; ~25s on
+  Linux CPU)
+- subprocess test E: lazy-refresh transition end-to-end (subprocess
+  wiring of the 3.10 first-run UX fix)
+- AST check: rejects `sys.stdout.write` / `os.write(1, ...)` /
+  `StreamHandler(sys.stdout)` / `print(..., file=sys.stdout)` anywhere
+  in `src/recall/`
+- ruff T201 invocation as test (belt-and-suspenders against bypassed
+  per-file ignores)
+
+The reusable subprocess fixture lives in `tests/conftest.py` as
+`mcp_subprocess_session` (and the parametrized factory variant
+`mcp_subprocess_factory`). Holds stdin open across the whole session
+— this is what the 3.10 static-pipe-EOF finding above prescribed.
+3.12's pseudo-client + recorded-session-fixture replay tests inherit
+the helper API (initialize / list_tools / call_tool / close /
+stderr_text) without modification.
+
+**Linux-only for v1.** Per F2 lock at 3.11 plan: stdio-cleanliness CI
+runs on Linux py3.12 only. M-series-specific cleanliness (MPS warmup
+prints, mac-specific torch warnings) is verified via maintainer's
+local manual smoke pre-launch. v1.x may add cross-platform CI when
+self-hosted M-series runners are available. **v1.0 launch checklist
+item (must be complete before announce):** run cold-cache subprocess
+test on local M-series Mac, append result to docs/clients-tested.md.
+
+**Daily CI failure recovery path (v1).** Workflow-run failure only —
+GitHub Actions' default failure email to the repo owner is sufficient
+for one-maintainer triage. Recovery rule: if cold-cache test fails on
+a daily run with network/timeout error, re-run once. Twice consecutive
+= real signal (check status.huggingface.co or treat as regression).
+Don't pre-emptively `@pytest.mark.flaky(reruns=2)` — masks signal.
+Manual maintainer decision based on observed failure pattern, not
+automatic CI rule. Phase 4 may add user-facing alerting (status badge
+in README) but v1 gate-existence is the value.
+
+**T201 + AST-check split, validated at 3.11 implementation.** During
+3.11 first-run, T201 caught two `print(..., file=sys.stderr)` calls
+in `src/recall/indexer.py` (CLI command, not on the stdio path).
+They were SAFE (explicit stderr destination), but T201 doesn't
+differentiate. Resolution: per-file-ignore for `indexer.py` in
+`pyproject.toml` with a documented rationale comment. The split
+of three rules — T201 (blanket "no print"), the AST check (precise
+"no stdout writes"), per-file-ignores (narrow exceptions where the
+blanket overshoots) — is doing the work intended:
+  - **T201** catches everything that *might* leak (false positives
+    are intentional; we'd rather force a justification than miss
+    a leak)
+  - **AST check** catches the actual leak vectors (`sys.stdout.write`,
+    `os.write(1, …)`, `StreamHandler(sys.stdout)`,
+    `print(…, file=sys.stdout)`) regardless of whether T201 fired
+  - **Per-file-ignores** narrow scope where the blanket rule provably
+    overshoots — `tests/`, `.github/scripts/`, `src/recall/indexer.py`
+A future contributor hitting T201 friction in non-stdio code should
+follow the same pattern: confirm via the AST check that the file
+isn't on a stdio path, then add a per-file-ignore with a comment
+linking back to this CLAUDE.md section.
+
 ### 6. Performance budgets (CI-enforced, Phase 3+)
 
 - Cold start (model load + db open): < 2 s on M-series Mac
@@ -408,6 +472,13 @@ will still be processed.
   itself, not just CI) at 120 s. The hard fail makes the runtime gate live
   in the harness, so an accidental 10× slowdown trips the discipline before
   CI even sees it.
+- stdio lane (Ubuntu py3.12; 3.11): ~30 s expected. Cold-cache
+  subprocess test pays HF model download + load ≈ 20-25 s; AST/T201
+  ≈ <1 s; subprocess scaffolding ≈ ~5 s. If lane runtime grows past
+  90 s, investigate — likely a new test, a model-download regression,
+  or a cache-isolation bug. Cold-cache test has a 90 s per-call
+  timeout with a diagnosable failure message that distinguishes
+  "HF download exceeded budget" from "stdout pollution."
 
 **Platform-translation factor (CI vs M-series).** CI Linux is
 **~11× slower than M-series Mac** for encode-bound workloads, not the
@@ -1226,6 +1297,30 @@ don't get lost in chat history.
   proves regression prevention, the real-history audit proves
   real-world coverage. Land in the README's privacy / trust
   section at v1 launch. Tag: documentation, phase-4.
+- **M-series stdio-cleanliness CI** — v1.x post-launch. Requires
+  self-hosted M-series runner (or GitHub-hosted ARM macOS runners
+  reaching general availability). Target the same cold-cache
+  subprocess test that runs on Linux today. Tag: tech-debt, ci,
+  post-v1.
+- **Status badge for stdio-cleanliness lane** — Phase 4 README
+  content. Add CI badge to README so HN visitors can see the
+  invariant is enforced (the trust story). Tag: documentation,
+  phase-4.
+- **v1.0 launch checklist: cold-cache subprocess test on local
+  M-series Mac.** Run before announce; append result to
+  docs/clients-tested.md (lands in Commit 3.13). The Linux-only
+  CI gate is sufficient for catch-on-PR; M-series adds confidence
+  that MPS warmup messages don't leak. Tag: v1-launch-blocker,
+  must-do-before-announce.
+- **Refactor `src/recall/indexer.py` `print(..., file=sys.stderr)`
+  calls to use logging.** Phase 4 polish, low priority. Currently
+  the indexer's user-facing progress lines (during `recall index`
+  CLI runs) use `print` with a per-file-ignore in pyproject.toml's
+  T201 enforcement. Refactoring to `_LOG.info()` would be more
+  consistent with the rest of the codebase and remove the per-file
+  exception. Cosmetic — the indexer is not on the stdio path
+  (CLI command, not the MCP server), so the prints are safe today.
+  Tag: tech-debt, phase-4.
 - **NL paraphrase-distance validator for the eval harness** —
   Phase-2-or-later, eval-quality. Automated shared-token analysis
   between NL and command after FTS5 tokenization, output a

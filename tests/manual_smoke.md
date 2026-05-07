@@ -386,3 +386,92 @@ The full Section B (each of the six tools against an indexed DB) +
 Section C (Claude Desktop UX confirmation) are run by the maintainer
 before squash-merge of this branch and again at every meaningful
 change to `tools.py` or `server.py`.
+
+---
+
+## Section D — stdio-cleanliness suite (3.11)
+
+This section is the in-process equivalent of the `stdio (ubuntu /
+py3.12)` CI lane added in Commit 3.11 — same tests, run locally on
+M-series. The CI lane is Linux-only per the F2 lock at 3.11 plan;
+this section is **the maintainer's M-series local verification**,
+which is a v1.0 launch-checklist item per CLAUDE.md "Deferred items."
+
+The lane source lives at `tests/test_stdio_cleanliness.py`. Six tests:
+
+- **A** initialize-only round-trip
+- **C** initialize + tools/call recent (no-index dispatch isolation)
+- **D** cold-cache tools/call search (the marquee test — empty
+  HF_HOME, fresh model download)
+- **E** lazy-refresh transition end-to-end (subprocess wiring of
+  the 3.10 first-run UX fix)
+- **AST check** rejects sys.stdout writes / StreamHandler(sys.stdout)
+  / print(..., file=sys.stdout) in src/recall/
+- **T201 invocation** runs `ruff check --select T201 src/recall/`
+  as a subprocess
+
+### Pre-run sanity check (the §7 isolation refinement)
+
+Before running test D, verify two things:
+
+1. **Warm HF cache exists** — `~/.cache/huggingface` should already
+   hold the bge-small-en-v1.5 model from prior dev work. This is the
+   BASELINE the test is contrasting against: when isolation works,
+   the test pays a real download/load cost (~5-25s on M-series, ~25s
+   on Linux). When isolation is broken, the test would unintentionally
+   reuse this warm cache and complete in <2s.
+
+   ```bash
+   ls -d ~/.cache/huggingface 2>&1 || \
+     echo "WARNING: no HF cache yet; first run will pay full download cost"
+   ```
+
+2. **Test D pays load cost** — assert wall time is ≥2s (M-series).
+   If completion <2s, the `isolated_hf_cache` fixture isn't actually
+   isolating — investigate before trusting any result.
+
+   ```bash
+   time uv run pytest tests/test_stdio_cleanliness.py::test_cold_cache_search_clean_stdout
+   ```
+
+### The procedure
+
+```bash
+# Non-embed tests (A, C, E, AST, T201) — fast (~5s)
+uv run pytest tests/test_stdio_cleanliness.py -v -m "not embed"
+
+# Cold-cache marquee test — separate so runtime is visible
+time uv run pytest tests/test_stdio_cleanliness.py::test_cold_cache_search_clean_stdout -v
+```
+
+### Assertion checklist
+
+- [ ] Tests A, C, E, AST check, T201 all pass (~5s combined).
+- [ ] Test D passes; wall time ≥2s on M-series (confirms isolation).
+- [ ] No Python tracebacks anywhere.
+- [ ] No WARNING/ERROR/CRITICAL log lines (`_assert_stderr_clean`
+      fires if any).
+
+### Last verified output (M-series local, 3.11 implementation)
+
+Tests A, C, E, AST check, T201 ran in **1.84s** combined. Test D
+(cold-cache, with `isolated_hf_cache` forcing fresh model load via
+empty HF_HOME) ran in **22.65s** — well above the 2s sanity
+threshold, confirming cache isolation. All 6 tests passed; zero
+tracebacks; zero stderr warnings.
+
+```
+tests/test_stdio_cleanliness.py::test_initialize_only_clean_stdout PASSED
+tests/test_stdio_cleanliness.py::test_recent_no_index_clean_stdout PASSED
+tests/test_stdio_cleanliness.py::test_lazy_refresh_subprocess PASSED
+tests/test_stdio_cleanliness.py::test_no_stdout_writes_in_src PASSED
+tests/test_stdio_cleanliness.py::test_ruff_t201_clean PASSED
+tests/test_stdio_cleanliness.py::test_cold_cache_search_clean_stdout PASSED  [22.65s]
+```
+
+### Pre-launch (v1.0 announce) re-run
+
+Per CLAUDE.md "Deferred items" → "v1.0 launch checklist: cold-cache
+subprocess test on local M-series Mac" — re-run test D before v1.0
+announcement and append the result here (or to `docs/clients-tested.md`
+once Commit 3.13 lands that file).

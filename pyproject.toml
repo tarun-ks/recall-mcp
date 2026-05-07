@@ -89,11 +89,29 @@ select = [
   "UP",  # pyupgrade
   "SIM", # flake8-simplify
   "RUF", # ruff-specific
+  "T201", # 3.11: ban print() in stdio-bound code paths.
+          # Print silently breaks MCP framing (CLAUDE.md §5). Tests +
+          # CI scripts + the indexer CLI are not stdio-bound — see
+          # per-file-ignores below.
 ]
 # CLI summary uses U+00D7 (×) as the multiplier glyph in "semantic is N.NX×
 # better" output and U+221E (∞) for the divide-by-zero ranker case. Both
 # are intentional human-facing display chars, not confusables to flag.
 allowed-confusables = ["×", "∞"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may print() for debugging — they're ephemeral, not under stdio
+# constraint. No test currently prints; the entry declares policy for
+# future contributors.
+"tests/**/*.py" = ["T201"]
+# CI helper scripts run in the GitHub Actions runner; not stdio-bound.
+".github/scripts/*.py" = ["T201"]
+# `recall index` is a CLI command run by the user; its stderr progress
+# lines are user-facing terminal output. Distinct from the MCP `recall
+# serve` stdio path. The custom AST check (test_stdio_cleanliness.py)
+# still rejects print(..., file=sys.stdout) here — only blanket T201
+# is relaxed.
+"src/recall/indexer.py" = ["T201"]
 
 [tool.ruff.format]
 quote-style = "double"

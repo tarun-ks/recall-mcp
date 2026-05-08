@@ -1,0 +1,17 @@
+# Scenario S3: error-then-recovery. After tools/call returns isError=True,
+# the next tools/call must succeed — i.e. one error doesn't leave the
+# session wedged.
+# DB state: 10-row synthetic-vector DB (fixture_indexed_db).
+# Lane runtime contribution: ~0.3s.
+# Format spec: tests/fixtures/sessions/_FORMAT.md.
+
+> initialize {"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-subprocess","version":"0.0.1"}}
+< {"jsonrpc":"2.0","id":"<INT>","result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{},"tools":{"listChanged":false}},"serverInfo":{"name":"recall-mcp","version":"0.0.1"}}}
+
+> notifications/initialized {}
+
+> tools/call {"name":"command_stats","arguments":{"pattern":"%"}}
+< {"jsonrpc":"2.0","id":"<INT>","result":{"content":"<ANY>","structuredContent":{"error":"pattern cannot be bare SQL wildcards (e.g. '%', '%%'); provide a literal substring.","results":[]},"isError":true}}
+
+> tools/call {"name":"command_stats","arguments":{"pattern":"git"}}
+< {"jsonrpc":"2.0","id":"<INT>","result":{"content":"<ANY>","structuredContent":{"top_cwds":[["/home/u/proj","<INT>"]],"mean_duration_ms":null,"success_rate":null,"by_source":{"zsh":"<INT>"},"total":"<INT>"},"isError":false}}

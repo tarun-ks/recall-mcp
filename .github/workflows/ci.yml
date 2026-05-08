@@ -42,7 +42,15 @@ jobs:
       - name: mypy
         run: uv run --python ${{ matrix.python-version }} mypy src
       - name: pytest (no embed)
-        run: uv run --python ${{ matrix.python-version }} pytest -m "not embed"
+        # Fast lane excludes tests/test_recorded_sessions.py — those are
+        # subprocess-driven MCP protocol-conformance tests owned by the
+        # `stdio` lane (locked Phase 3.12 §9). Running them here too
+        # would (a) duplicate the work N×matrix-cells and (b) spread
+        # S1's 30s idle cost across every cell. See the comment on the
+        # `stdio` job below for the lane-ownership boundary.
+        run: |
+          uv run --python ${{ matrix.python-version }} pytest -m "not embed" \
+            --ignore=tests/test_recorded_sessions.py
 
   embed:
     name: embed (ubuntu / py3.12)
@@ -117,18 +125,33 @@ jobs:
   stdio:
     name: stdio (ubuntu / py3.12)
     runs-on: ubuntu-latest
-    # 3.11 dedicated lane: subprocess + cold-cache stress + AST + T201
-    # invocation. Per CLAUDE.md §5 + the F2 lock at 3.11 plan:
-    #  - stdio cleanliness invariant lives here
-    #  - Linux-only for v1; M-series cleanliness verified via maintainer
-    #    manual smoke (tests/manual_smoke.md Section D)
-    #  - daily schedule trigger catches upstream regressions (e.g. HF
-    #    adds progress bar in a future release silently)
+    # === Lane ownership boundary (locked Phase 3.11 + 3.12 §9) ===
     #
-    # Runtime envelope: ~30s (cold-cache pays ~25s for HF download +
-    # model load on Linux CPU; AST/T201 ≈ <1s; subprocess scaffolding
-    # ≈ ~5s). If lane runtime grows past 90s, investigate (see
-    # CLAUDE.md "Performance budgets").
+    # The `stdio` lane owns ALL subprocess-driven MCP tests:
+    #   - tests/test_stdio_cleanliness.py (3.11): transport invariant —
+    #     subprocess + cold-cache stress + AST check + T201 invocation.
+    #   - tests/test_recorded_sessions.py (3.12): protocol conformance —
+    #     5 recorded scenarios (S1 long_idle, S2 happy_path, S3 error
+    #     recovery, S4 multiple_back_to_back, S6 pipelined_requests) +
+    #     loader/matcher self-tests.
+    #
+    # Both files share the MCPSubprocessSession fixture and the
+    # subprocess setup cost; running them in the same lane amortizes
+    # checkout + uv sync once. Fast lane excludes test_recorded_sessions
+    # via --ignore (see fast lane above) so S1's 30s idle test isn't
+    # paid 6× across the matrix.
+    #
+    # Per F2 lock (3.11): Linux-only for v1; M-series stdio cleanliness
+    # verified via maintainer manual smoke (tests/manual_smoke.md
+    # Section D). Daily schedule trigger catches upstream regressions
+    # (e.g. HF adds progress bar in a future release silently; SDK
+    # update changes initialize-response shape; etc.).
+    #
+    # Runtime envelope: ~50s (cold-cache ~25s + S1 idle 30s + ~5s
+    # remaining; some overlap from concurrent test execution). If
+    # lane runtime grows past 90s on three consecutive runs, evaluate
+    # splitting into transport-cleanliness vs protocol-conformance
+    # lanes per CLAUDE.md "Deferred items".
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -138,13 +161,43 @@ jobs:
         run: uv python install 3.12
       - name: sync deps
         run: uv sync --python 3.12
-      - name: stdio cleanliness suite (subprocess + AST + T201)
+      - name: stdio + recorded-session suite
         # PYTHONUNBUFFERED ensures stdout writes from the subprocess
         # under test are flushed to the parent without buffering — we
         # need byte-for-byte determinism on what reaches stdout.
         env:
           PYTHONUNBUFFERED: "1"
-        run: uv run --python 3.12 pytest tests/test_stdio_cleanliness.py -v
+        run: |
+          uv run --python 3.12 pytest \
+            tests/test_stdio_cleanliness.py \
+            tests/test_recorded_sessions.py \
+            -v
+
+  fixture-drift-warning:
+    name: fixture drift warning
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    # 3.12 lightweight surface for the fixture-drift policy. When a PR
+    # touches both tests/fixtures/sessions/*.jsonl AND
+    # src/recall/{server,tools}.py, emit a ::warning:: annotation
+    # asking the reviewer to verify fixture changes match the surface
+    # change line-by-line — not rubber-stamp. Doesn't block merge.
+    # Reviewer attention is the weakest enforcement link; this surfaces
+    # the requirement at PR time so it's visible, not just memorial.
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: detect fixture-drift PR
+        run: |
+          base="origin/${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base"...HEAD)
+          fixt=$(echo "$changed" | grep -E '^tests/fixtures/sessions/' || true)
+          surf=$(echo "$changed" | grep -E '^src/recall/(server|tools)\.py$' || true)
+          if [ -n "$fixt" ] && [ -n "$surf" ]; then
+            echo "::warning::Fixture drift detected — both tests/fixtures/sessions/* AND src/recall/{server,tools}.py touched. Reviewer must verify fixture changes match the surface change line-by-line; do not rubber-stamp. See CLAUDE.md §5 'Recorded session fixtures' for the policy."
+          else
+            echo "no fixture drift detected on this PR"
+          fi
 
   scrub-canary:
     name: scrubber test count canary

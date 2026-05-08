@@ -146,6 +146,32 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: uv run --python 3.12 pytest tests/test_stdio_cleanliness.py -v
 
+  fixture-drift-warning:
+    name: fixture drift warning
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    # 3.12 lightweight surface for the fixture-drift policy. When a PR
+    # touches both tests/fixtures/sessions/*.jsonl AND
+    # src/recall/{server,tools}.py, emit a ::warning:: annotation
+    # asking the reviewer to verify fixture changes match the surface
+    # change line-by-line — not rubber-stamp. Doesn't block merge.
+    # Reviewer attention is the weakest enforcement link; this surfaces
+    # the requirement at PR time so it's visible, not just memorial.
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: detect fixture-drift PR
+        run: |
+          base="origin/${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base"...HEAD)
+          fixt=$(echo "$changed" | grep -E '^tests/fixtures/sessions/' || true)
+          surf=$(echo "$changed" | grep -E '^src/recall/(server|tools)\.py$' || true)
+          if [ -n "$fixt" ] && [ -n "$surf" ]; then
+            echo "::warning::Fixture drift detected — both tests/fixtures/sessions/* AND src/recall/{server,tools}.py touched. Reviewer must verify fixture changes match the surface change line-by-line; do not rubber-stamp. See CLAUDE.md §5 'Recorded session fixtures' for the policy."
+          else
+            echo "no fixture drift detected on this PR"
+          fi
+
   scrub-canary:
     name: scrubber test count canary
     runs-on: ubuntu-latest

@@ -1,0 +1,17 @@
+# Scenario S2: happy path. Initialize → notifications/initialized → tools/list → tools/call recent.
+# Tests the positive-case end-to-end flow that real users walk every session.
+# DB state: 10-row synthetic-vector DB (fixture_indexed_db). recent returns
+# the 3 most-recent commands by ts DESC: pytest -xvs (ts=1090), uv sync (1080), make test (1070).
+# Lane runtime contribution: ~0.5s.
+# Format spec: tests/fixtures/sessions/_FORMAT.md.
+
+> initialize {"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-subprocess","version":"0.0.1"}}
+< {"jsonrpc":"2.0","id":"<INT>","result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{},"tools":{"listChanged":false}},"serverInfo":{"name":"recall-mcp","version":"0.0.1"}}}
+
+> notifications/initialized {}
+
+> tools/list {}
+< {"jsonrpc":"2.0","id":"<INT>","result":{"tools":"<ANY>"}}
+
+> tools/call {"name":"recent","arguments":{"limit":3}}
+< {"jsonrpc":"2.0","id":"<INT>","result":{"content":"<ANY>","structuredContent":{"results":[{"id":"<INT>","text":"pytest -xvs","text_hash":"<HEX16>","source":"zsh","ts":"<TS>","cwd":"/home/u/proj","hostname":null,"exit_code":null,"duration_ms":null,"session_id":null,"score":null},{"id":"<INT>","text":"uv sync","text_hash":"<HEX16>","source":"zsh","ts":"<TS>","cwd":"/home/u/proj","hostname":null,"exit_code":null,"duration_ms":null,"session_id":null,"score":null},{"id":"<INT>","text":"make test","text_hash":"<HEX16>","source":"zsh","ts":"<TS>","cwd":"/home/u/proj","hostname":null,"exit_code":null,"duration_ms":null,"session_id":null,"score":null}]},"isError":false}}

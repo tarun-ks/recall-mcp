@@ -147,6 +147,71 @@ class MCPSubprocessSession:
         line = await self._read_line(timeout=timeout)
         return json.loads(line)
 
+    # === Generic frame I/O (3.12) ===
+    #
+    # Used by the recorded-session replay engine. The typed helpers above
+    # (initialize / list_tools / call_tool) are convenience wrappers; tests
+    # that play arbitrary recorded fixtures use these instead.
+
+    async def send_request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Send a JSON-RPC request and return the parsed response.
+
+        The id is allocated internally via the session counter — callers
+        do NOT pass id (per the locked Phase 3.12 §6 decision). Caller-
+        provided ids are a footgun: a bug where fixture authors pick
+        conflicting ids silently breaks request/response pairing under
+        future SDK changes that would otherwise be caught by the
+        pipelined-id-correctness test.
+
+        Returns the response id at the top level so callers (replay
+        engine) can build id-keyed dicts for pipelined matching.
+        """
+        req_id = self._next_id
+        self._next_id += 1
+        frame: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id, "method": method}
+        if params is not None:
+            frame["params"] = params
+        await self._send(frame)
+        line = await self._read_line(timeout=timeout)
+        return json.loads(line)
+
+    async def send_request_no_wait(self, method: str, params: dict[str, Any] | None = None) -> int:
+        """Send a JSON-RPC request WITHOUT awaiting the response.
+
+        Returns the allocated request id so the caller can correlate the
+        eventual response. Used by the pipelined-request scenario (S6):
+        send N requests, then read N responses, then match by id.
+        """
+        req_id = self._next_id
+        self._next_id += 1
+        frame: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id, "method": method}
+        if params is not None:
+            frame["params"] = params
+        await self._send(frame)
+        return req_id
+
+    async def send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
+        """Send a JSON-RPC notification (no id, no response expected)."""
+        frame: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            frame["params"] = params
+        await self._send(frame)
+
+    async def read_response(self, *, timeout: float = 30.0) -> dict[str, Any]:
+        """Read the next JSON-RPC response without sending anything.
+
+        Used by the pipelined-request scenario after multiple
+        send_request_no_wait() calls.
+        """
+        line = await self._read_line(timeout=timeout)
+        return json.loads(line)
+
     async def close(self) -> None:
         """Close stdin (signals EOF), then wait briefly for graceful exit
         before SIGTERM → SIGKILL escalation."""

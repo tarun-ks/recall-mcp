@@ -1,0 +1,36 @@
+# Scenario S6: pipelined-request id correctness. Client sends two
+# requests WITHOUT awaiting responses, then collects responses. Replay
+# engine matches each response to its request by id (NOT by arrival
+# position).
+#
+# === SDK behavior (verified at 3.12 implementation spike, 2026-05-08) ===
+# The mcp SDK currently SERIALIZES request processing — one frame in,
+# one response out, in send order. The id-mismatch failure mode this
+# scenario is designed to catch CANNOT OCCUR under the current SDK.
+# This fixture passes trivially TODAY.
+#
+# Role: REGRESSION DEFENSE. If a future SDK release introduces concurrent
+# dispatch (multiple in-flight tool calls), this test would catch any
+# id-pairing bug — i.e. response for request id=A carrying the result
+# meant for id=B. That's the silent-corruption failure mode that would
+# otherwise produce "wrong tool result" symptoms in real MCP clients.
+#
+# In-order arrival is an SDK implementation detail; id-correctness is
+# the protocol contract. This fixture asserts the contract, not the
+# implementation detail.
+#
+# DB state: 10-row synthetic-vector DB (fixture_indexed_db).
+# Lane runtime contribution: ~0.3s.
+# Format spec: tests/fixtures/sessions/_FORMAT.md.
+
+> initialize {"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-subprocess","version":"0.0.1"}}
+< {"jsonrpc":"2.0","id":"<INT>","result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{},"tools":{"listChanged":false}},"serverInfo":{"name":"recall-mcp","version":"0.0.1"}}}
+
+> notifications/initialized {}
+
+#PIPELINE-START
+> tools/call {"name":"recent","arguments":{"limit":2}}  # tag:recent
+> tools/call {"name":"command_stats","arguments":{"pattern":"git"}}  # tag:stats
+< {"jsonrpc":"2.0","id":"<INT>","result":{"content":"<ANY>","structuredContent":{"results":[{"id":"<INT>","text":"pytest -xvs","text_hash":"<HEX16>","source":"zsh","ts":"<TS>","cwd":"/home/u/proj","hostname":null,"exit_code":null,"duration_ms":null,"session_id":null,"score":null},{"id":"<INT>","text":"uv sync","text_hash":"<HEX16>","source":"zsh","ts":"<TS>","cwd":"/home/u/proj","hostname":null,"exit_code":null,"duration_ms":null,"session_id":null,"score":null}]},"isError":false}}  # tag:recent
+< {"jsonrpc":"2.0","id":"<INT>","result":{"content":"<ANY>","structuredContent":{"top_cwds":[["/home/u/proj","<INT>"]],"mean_duration_ms":null,"success_rate":null,"by_source":{"zsh":"<INT>"},"total":"<INT>"},"isError":false}}  # tag:stats
+#PIPELINE-END

@@ -32,6 +32,14 @@ The procedure has three sections:
    exist with at least a few hundred rows. Build via `recall index`
    if needed.
 
+<!--
+3.12 cross-reference: the recorded MCP protocol scenarios in
+tests/test_recorded_sessions.py (replaying tests/fixtures/sessions/*.jsonl)
+are the CI-enforced equivalent of Sections A and B. The manual procedure
+below stays as the maintainer's local M-series gate; the replay tests
+catch the same regressions on every PR via the stdio CI lane.
+-->
+
 ## Section A — 3.9-era initialize handshake
 
 Run the following from the repo root:

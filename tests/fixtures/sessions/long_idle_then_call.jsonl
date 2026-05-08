@@ -1,0 +1,26 @@
+# Scenario S1 (marquee): long idle then tool call. After initialize +
+# initialized, the test sleeps 30s, then issues a tools/call. Asserts:
+#
+#   (a) SDK stdio handler survives idle.
+#
+# 30s rationale: smallest value meaningfully exercising the idle case
+# while keeping the stdio lane under the 90s investigate threshold
+# (CLAUDE.md §6 "Performance budgets"). If real-world idle issues
+# post-launch are 5min+, add a longer scenario via a deferred-items entry.
+#
+# Failure mode: subsequent tools/call returns timeout, malformed
+# response, or server has exited. If failure occurs at exactly 30s with
+# connection error, likely SDK internal idle timeout — investigate.
+#
+# DB state: 10-row synthetic-vector DB (fixture_indexed_db).
+# Lane runtime contribution: ~30s.
+# Format spec: tests/fixtures/sessions/_FORMAT.md.
+
+> initialize {"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-subprocess","version":"0.0.1"}}
+< {"jsonrpc":"2.0","id":"<INT>","result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{},"tools":{"listChanged":false}},"serverInfo":{"name":"recall-mcp","version":"0.0.1"}}}
+
+> notifications/initialized {}
+
+#IDLE 30
+> tools/call {"name":"recent","arguments":{"limit":1}}
+< {"jsonrpc":"2.0","id":"<INT>","result":{"content":"<ANY>","structuredContent":{"results":[{"id":"<INT>","text":"pytest -xvs","text_hash":"<HEX16>","source":"zsh","ts":"<TS>","cwd":"/home/u/proj","hostname":null,"exit_code":null,"duration_ms":null,"session_id":null,"score":null}]},"isError":false}}

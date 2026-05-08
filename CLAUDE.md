@@ -455,6 +455,64 @@ follow the same pattern: confirm via the AST check that the file
 isn't on a stdio path, then add a per-file-ignore with a comment
 linking back to this CLAUDE.md section.
 
+**Recorded session fixtures (3.12).** End-to-end MCP protocol
+scenarios live as JSONL files at `tests/fixtures/sessions/*.jsonl`
+and are replayed by `tests/test_recorded_sessions.py` in the same
+`stdio` lane. Where 3.11's stdio cleanliness tests prove the BYTES
+are clean (transport invariant), 3.12's recorded fixtures prove the
+PROTOCOL behaves correctly across multi-frame scenarios that
+single-call subprocess tests can't reach.
+
+Format spec at `tests/fixtures/sessions/_FORMAT.md`. Sentinel
+matching: `<TS>` (any non-negative int), `<HEX16>` (16-char hex),
+`<SCORE>` (float in [-1, 1]), `<INT>` (any int), `<ANY>` (escape
+hatch — warned in CI logs when count > 2 per fixture). Pipelined
+blocks delimited by `#PIPELINE-START` / `#PIPELINE-END` with
+`# tag:<name>` annotations on each frame; the replay engine
+matches expected responses against actual by tag → request id,
+not by arrival order. Tag uniqueness within a block is a format
+constraint enforced by the loader (catches the silent-failure
+mode where someone copy-pastes a fixture line and forgets to
+update the tag).
+
+3.12 ships five scenarios:
+- **S1 long_idle_then_call** — 30s idle then tool call. Asserts
+  (a) SDK stdio handler survives idle. Failure mode: subsequent
+  tools/call returns timeout, malformed response, or server has
+  exited. If failure occurs at exactly 30s with connection error,
+  likely SDK internal idle timeout — investigate.
+- **S2 happy_path** — initialize → tools/list → tools/call recent.
+  The positive case real users walk every session.
+- **S3 error_then_recovery** — validation error doesn't leave the
+  session wedged for the next call.
+- **S4 multiple_back_to_back** — sequential calls preserve state +
+  no per-call resource leak.
+- **S6 pipelined_requests** — id correctness under pipelined sends.
+  Per the 3.12 implementation spike, the mcp SDK currently
+  serializes processing (one in, one out, in send order); this
+  scenario is REGRESSION DEFENSE against future SDK changes that
+  would introduce concurrent dispatch with id-mismatch bugs.
+
+**Fixture drift policy.** When the mcp SDK or recall's tool
+surface changes intentionally, fixtures are hand-edited in the
+SAME commit. Reviewer must verify fixture changes match the
+surface change line-by-line — not rubber-stamp. CI surface: the
+`fixture drift warning` lane emits a `::warning::` annotation on
+PRs that touch both `tests/fixtures/sessions/*.jsonl` AND
+`src/recall/{server,tools}.py`, asking the reviewer to check
+the diff intentionally. Doesn't block merge; surfaces the
+requirement at PR time so it's visible, not just memorial.
+
+**Complementarity with 3.13's manual smoke (forward note).**
+Recorded fixtures are end-to-end protocol verification under
+controlled conditions; 3.13's manual smoke checklist is human-
+eyeball verification across real MCP clients (Claude Desktop,
+Cursor, Zed, Cline) where rendering, tool palette behavior, and
+natural-language summary quality can't be CI-tested. Replay
+catches regressions in the protocol contract; manual smoke
+catches regressions in the user-visible UX. Both surfaces are
+required for v1 launch readiness.
+
 ### 6. Performance budgets (CI-enforced, Phase 3+)
 
 - Cold start (model load + db open): < 2 s on M-series Mac
@@ -1297,6 +1355,37 @@ don't get lost in chat history.
   proves regression prevention, the real-history audit proves
   real-world coverage. Land in the README's privacy / trust
   section at v1 launch. Tag: documentation, phase-4.
+- **Record-mode for fixture authoring (3.12).** Hand-writing
+  recorded session fixtures scales for ≤10 scenarios. If the
+  fixture count grows past ~10, build a record-mode helper that
+  spawns `recall serve`, runs through a documented happy/error
+  path, and dumps the captured frames to a fixture file (with
+  manual sentinel substitution as a follow-up step). Trigger:
+  fixture count in `tests/fixtures/sessions/` exceeds 10. Tag:
+  tech-debt, eval-quality, post-3.12.
+- **Lane split (transport-cleanliness vs protocol-conformance)**
+  — v1.x post-launch. Currently 3.11's stdio cleanliness tests
+  and 3.12's recorded session replay tests share the single
+  `stdio` lane. If the lane wall-clock exceeds 90s on three
+  consecutive runs, evaluate splitting into two lanes:
+  `stdio-cleanliness` (3.11 transport tests) and
+  `protocol-conformance` (3.12 replay tests). Trigger: lane
+  wall-clock > 90s on three consecutive PR or daily runs. Tag:
+  tech-debt, ci, post-launch.
+- **Malformed-frame fixtures.** Recorded session fixtures
+  currently cover only well-formed protocol traffic. If a real
+  MCP client is observed sending malformed frames (user bug
+  report or session log), add a fixture asserting the server's
+  error response. Trigger: at least one observed instance, not
+  theoretical concern. Tag: post-launch, defensive.
+- **Fixture drift PR comment vs lane warning.** 3.12 ships a
+  workflow-level `::warning::` annotation on PRs that touch both
+  fixture and surface files. If reviewer attention proves
+  insufficient (a real fixture-drift bug slips through PR
+  review), upgrade to a PR comment via `gh pr comment` or a
+  required-status-check. Trigger: first observed
+  fixture-drift-slipped-review incident. Tag: ci, defensive,
+  post-launch.
 - **M-series stdio-cleanliness CI** — v1.x post-launch. Requires
   self-hosted M-series runner (or GitHub-hosted ARM macOS runners
   reaching general availability). Target the same cold-cache

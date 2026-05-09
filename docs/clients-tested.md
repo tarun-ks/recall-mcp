@@ -47,6 +47,109 @@ Before v1 announce:
 
 ---
 
+## Pending fixes (3.13.5)
+
+Surfaced during the Claude.ai MCP connector verification session that
+exercised real tools/call dispatch against an indexed corpus. These
+findings predate 3.13 (introduced in 3.10's tool implementations);
+3.13's matrix surfaced them. Both ship as a 3.13.5 hotfix on a fresh
+branch after 3.13 squash-merges.
+
+### F1 — `commands_after` returns empty `following` for non-atuin indexes
+
+**Symptom:** When the index has only zsh/bash entries (no atuin),
+`commands_after` returns `pattern_match` correctly but `following`
+is always `[]`. The tool *runs successfully* (no error) but provides
+no sequence data — silent UX degradation.
+
+**Root cause:** zsh/bash readers don't capture `session_id`. The
+SQL lookup `WHERE session_id = ? AND ts > ...` returns no rows when
+`session_id IS NULL`. Handler explicitly skips the lookup in that
+case (returns empty `following`). Behavior is consistent with the
+description's "in the same session" wording but the description
+under-emphasizes the atuin dependency.
+
+**Fix path (3.13.5):** Make `commands_after` atuin-required like
+`failed_recently`. Add `state: no_atuin_source` check; return clean
+state-error with this message:
+
+> commands_after requires atuin source data for session-boundary
+> tracking. Your index doesn't include atuin records. Install atuin
+> (https://atuin.sh) to capture session ids for new commands, then
+> run 'recall index' to incrementally pick them up. (Without atuin,
+> sequence tracking would conflate commands across concurrent
+> terminal sessions.)
+
+The parenthetical surfaces the correctness reason — closes the
+"couldn't you just guess?" question for the LLM client (and through
+it the user) before it gets asked. Cross-session conflation is real:
+two terminals running independently produce ts-adjacent commands
+with no causal relationship.
+
+**Why not a timestamp-adjacency heuristic?** Considered (option (b)
+in 3.13's diagnosis); rejected. Single-terminal users would get
+useful results; multi-terminal users would get occasional incorrect
+causality. A semantic-search tool's value depends on result
+trustworthiness; conflating sessions corrupts that.
+
+**Cost:** ~10 LoC + 1 fixture update + tool description tweak.
+
+### F2 — only 4 of 6 tools registered in MCP client
+
+**Symptom:** `recent` and `failed_recently` not appearing in the
+client's tool palette. Other 4 tools (search, find_in_project,
+commands_after, command_stats) appear normally.
+
+**Hypothesis:** The 4 visible tools all have at least one required
+parameter (`query` or `pattern`); the 2 missing tools have no
+required parameters (all fields default or nullable). Pydantic v2's
+`model_json_schema()` **omits the `"required"` key entirely when
+no fields are required** (vs emitting `"required": []`). Some MCP
+clients filter or hide tools whose schema lacks a `required`
+declaration.
+
+**Verification needed before fix (3.13.5 plan should include):**
+1. Capture actual tools/list JSON from a fresh Claude Desktop session
+   against current main; compare to 3.10 manual smoke baseline.
+2. Test the same recall server against one other MCP client (Cursor
+   or Zed). If `recent`/`failed_recently` appear there → Claude.ai
+   MCP connector-specific filtering, fix framed as "compatibility
+   shim." If they don't appear in any client → JSON Schema convention
+   issue, fix framed as "spec compliance."
+
+**Fix path (3.13.5) — same regardless of root cause:**
+3-line `setdefault("required", [])` in `_tool_for()`:
+
+```python
+def _tool_for(name, description, model):
+    schema = model.model_json_schema()
+    schema.setdefault("required", [])  # MCP-client compatibility
+    return Tool(name=name, description=description, inputSchema=schema)
+```
+
+Doesn't change semantics; makes the schema explicit. Backwards-
+compatible with clients that already work.
+
+### Per-client cross-reference
+
+Each client's "Known Issues" subsection below cross-references this
+"Pending fixes (3.13.5)" section rather than restating the findings.
+After 3.13.5 lands, entries here update from "Pending fix" to
+"Fixed in 3.13.5" with the squash-commit SHA — preserves the
+evidence trail.
+
+### Finding 3 — README framing (Phase 4, not 3.13.5)
+
+Most metadata fields (cwd, hostname, ts, session_id) are null for
+zsh/bash entries because those readers don't capture them. Not a
+bug; an honest limitation. Phase 4 README needs framing as value-
+add: "atuin integration enables richest UX; without it, semantic
+search + frequency analytics still work fully." Familiar
+"install X for full experience" pattern. Tracked as Phase 4
+deferred entry in CLAUDE.md.
+
+---
+
 ## Cursor (macOS)
 
 | field           | value |
@@ -76,7 +179,10 @@ or notably bad)_
 
 ### Known issues
 
-- (none yet — fill bullet list as observations accumulate)
+- See top-level **"Pending fixes (3.13.5)"** section for server-side
+  findings (F1: commands_after non-atuin; F2: only-4-of-6-tools). Both
+  apply to any client and ship as a 3.13.5 hotfix.
+- _(client-specific quirks: maintainer fills as observations accumulate)_
 
 ---
 
@@ -116,7 +222,10 @@ or notably bad)_
 
 ### Known issues
 
-- (none yet)
+- See top-level **"Pending fixes (3.13.5)"** section for server-side
+  findings (F1: commands_after non-atuin; F2: only-4-of-6-tools). Both
+  apply to any client and ship as a 3.13.5 hotfix.
+- _(client-specific quirks: maintainer fills as observations accumulate)_
 
 ---
 
@@ -147,7 +256,10 @@ _(maintainer fills in)_
 
 ### Known issues
 
-- (none yet)
+- See top-level **"Pending fixes (3.13.5)"** section for server-side
+  findings (F1: commands_after non-atuin; F2: only-4-of-6-tools). Both
+  apply to any client and ship as a 3.13.5 hotfix.
+- _(client-specific quirks: maintainer fills as observations accumulate)_
 
 ---
 
@@ -178,7 +290,10 @@ _(maintainer fills in)_
 
 ### Known issues
 
-- (none yet)
+- See top-level **"Pending fixes (3.13.5)"** section for server-side
+  findings (F1: commands_after non-atuin; F2: only-4-of-6-tools). Both
+  apply to any client and ship as a 3.13.5 hotfix.
+- _(client-specific quirks: maintainer fills as observations accumulate)_
 
 ---
 
@@ -221,4 +336,7 @@ _(maintainer fills in pre-launch via UTM VM session)_
 
 ### Known issues
 
-- (none yet)
+- See top-level **"Pending fixes (3.13.5)"** section for server-side
+  findings (F1: commands_after non-atuin; F2: only-4-of-6-tools). Both
+  apply to any client and ship as a 3.13.5 hotfix.
+- _(client-specific quirks: maintainer fills as observations accumulate)_

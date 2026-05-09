@@ -1453,6 +1453,19 @@ don't get lost in chat history.
   proves regression prevention, the real-history audit proves
   real-world coverage. Land in the README's privacy / trust
   section at v1 launch. Tag: documentation, phase-4.
+- **README v1: explicit "rich UX requires atuin" framing** — Phase
+  4 README content. Surfaced at 3.13's clients-tested matrix
+  verification: zsh/bash readers don't capture cwd, hostname,
+  exit_code, duration_ms, or session_id (atuin captures all of
+  them). Two tools (`commands_after`, `failed_recently`) require
+  atuin's session-tracking + exit-code data to function; the
+  semantic-search core works without atuin. Frame in README as
+  value-add: "atuin integration enables richest UX; without it,
+  semantic search + frequency analytics still work fully."
+  Familiar "install X for full experience" pattern. NOT a bug —
+  honest limitation that the README needs to surface upfront so
+  drive-by visitors understand the install matrix before they
+  install. Tag: documentation, phase-4.
 - **Record-mode for fixture authoring (3.12).** Hand-writing
   recorded session fixtures scales for ≤10 scenarios. If the
   fixture count grows past ~10, build a record-mode helper that

@@ -199,6 +199,45 @@ jobs:
             echo "no fixture drift detected on this PR"
           fi
 
+  stdio-windows:
+    name: stdio (windows / py3.12)
+    runs-on: windows-latest
+    if: github.event_name != 'schedule'
+    # 3.13 Windows verification gate. Subset of stdio-cleanliness:
+    # initialize-only (A), recent-no-index (C), lazy-refresh (E), AST,
+    # T201. Skips cold-cache (D) — HF/torch Windows-specific behavior
+    # isn't stdio-cleanliness territory; would surface as "is torch
+    # working on Windows" rather than "are we leaking stdout."
+    #
+    # Locked Phase 3.13 F1: combined approach. CI Windows lane is
+    # permanent; manual MCP-client UX verification on Windows happens
+    # pre-launch via UTM VM session (filled into docs/clients-tested.md).
+    #
+    # Triage rule for failures (CLAUDE.md "Windows test triage"):
+    #   - Test fails in recall code path AND non-Windows lanes pass:
+    #     real Windows bug; block 3.13 until fixed.
+    #   - Test fails in subprocess/pipe handling AND non-Windows lanes
+    #     pass: classify as Windows test-infra quirk; mark
+    #     pytest.skip(reason=..., platform=='win32'); document in
+    #     CLAUDE.md; file v1.x deferred entry; ship 3.13 without the
+    #     failing Windows test.
+    #   - Unclear cause: investigate before deciding. Don't ship with
+    #     unclear Windows state.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: install python 3.12
+        run: uv python install 3.12
+      - name: sync deps
+        run: uv sync --python 3.12
+      - name: stdio subset (no cold-cache)
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          uv run --python 3.12 pytest tests/test_stdio_cleanliness.py -v -k "not cold_cache"
+
   scrub-canary:
     name: scrubber test count canary
     runs-on: ubuntu-latest

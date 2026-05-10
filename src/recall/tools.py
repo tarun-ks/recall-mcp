@@ -114,6 +114,19 @@ NO_ATUIN_SOURCE_MSG = (
     "Install atuin and run 'recall index --source atuin'."
 )
 
+# F1 (3.13.5): commands_after also requires atuin. Different framing than
+# failed_recently's exit-code dependency — commands_after needs session_id
+# for session-boundary tracking. The parenthetical surfaces the correctness
+# reason (cross-session conflation) so the LLM client passes it to the user
+# rather than re-asking "couldn't you just guess?".
+COMMANDS_AFTER_NO_ATUIN_MSG = (
+    "commands_after requires atuin source data for session-boundary tracking. "
+    "Your index doesn't include atuin records. Install atuin (https://atuin.sh) "
+    "to capture session ids for new commands, then run 'recall index' to "
+    "incrementally pick them up. (Without atuin, sequence tracking would "
+    "conflate commands across concurrent terminal sessions.)"
+)
+
 CWD_CONTEXT_MISSING_MSG = (
     "find_in_project needs a working-directory context. Pass an explicit 'cwd' "
     "argument or set the MCP_CLIENT_CWD environment variable when launching the "
@@ -395,7 +408,17 @@ async def _handle_recent(
 ) -> tuple[dict[str, Any], int]:
     """List most-recent commands, optionally filtered by cwd/host.
 
-    Doesn't need the embedder; just an indexed-ts ORDER BY.
+    Doesn't need the embedder; just an indexed-ts ORDER BY with the
+    F4 hybrid fallback (3.13.5).
+
+    F4 fix: zsh/bash readers don't always capture timestamps; entries
+    emit ``ts=0`` per the HistorySource protocol. With all rows tied
+    at ts=0, the original ``ORDER BY ts DESC, id ASC`` collapsed to
+    id-ASC = oldest-insertion-first — contradicting the tool's
+    "most-recent" semantics. The hybrid ORDER BY treats real-ts rows
+    first (ts DESC), then ts=0 rows by ``id DESC`` (insertion order
+    as time-proxy — most recent insertion first). For typical
+    single-session indexing, id DESC approximates time-ordering.
     """
     inp = RecentInput.model_validate(arguments)
 
@@ -418,11 +441,15 @@ async def _handle_recent(
         params.append(inp.host)
 
     where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    # F4 hybrid ORDER BY: real-ts rows first (sorted by ts DESC), then
+    # ts=0 rows (sorted by id DESC as insertion-order time-proxy).
+    # The CASE WHEN expression partitions rows into two groups (0=real-ts,
+    # 1=unknown-ts); within each group, the secondary keys order them.
     sql = (
         "SELECT id, source, text_scrubbed, text_hash, cwd, hostname, "
         "exit_code, duration_ms, session_id, ts "
         f"FROM commands{where_sql} "
-        "ORDER BY ts DESC, id ASC LIMIT ?"
+        "ORDER BY (CASE WHEN ts > 0 THEN 0 ELSE 1 END), ts DESC, id DESC LIMIT ?"
     )
     params.append(inp.limit)
     rows = db_conn.execute(sql, params).fetchall()
@@ -562,6 +589,11 @@ async def _handle_commands_after(
     commands in the same session, time-ordered. Useful for 'what did I
     run after the failing migration?' queries.
 
+    Requires the atuin source for session tracking (F1 fix at 3.13.5).
+    zsh/bash readers don't capture session_id; without it, "after" can't
+    be defined without conflating commands across concurrent terminal
+    sessions. Returns a clean state-error when no atuin records exist.
+
     No regex flag (locked Q2). Pattern is treated as a literal substring.
     """
     inp = CommandsAfterInput.model_validate(arguments)
@@ -571,6 +603,15 @@ async def _handle_commands_after(
     if err is not None:
         return err
     assert db_conn is not None
+
+    # F1 (3.13.5): atuin presence check before pattern matching.
+    # Same shape as failed_recently's check; surfaces the dependency
+    # explicitly rather than silently degrading to empty `following`.
+    has_atuin_row = db_conn.execute(
+        "SELECT 1 FROM commands WHERE source = 'atuin' LIMIT 1"
+    ).fetchone()
+    if not has_atuin_row:
+        return _state_error_response(COMMANDS_AFTER_NO_ATUIN_MSG)
 
     pat = "%" + _escape_like(inp.pattern) + "%"
     matches = db_conn.execute(
@@ -811,10 +852,20 @@ async def _handle_find_in_project(
 
 
 def _tool_for(name: str, description: str, model: type[BaseModel]) -> Tool:
+    schema = model.model_json_schema()
+    # F2 (3.13.5) compatibility shim: Pydantic 2 omits the "required"
+    # key from JSON Schema when no fields are required (vs emitting
+    # "required": []). Some MCP clients filter or hide tools whose
+    # schema lacks a `required` declaration. Setting the default
+    # explicitly is spec-compatible and harmless for clients that
+    # already work. (Doesn't fix find_in_project's specific filtering;
+    # that's a separate investigation. This is the unconditional
+    # baseline.)
+    schema.setdefault("required", [])
     return Tool(
         name=name,
         description=description,
-        inputSchema=model.model_json_schema(),
+        inputSchema=schema,
     )
 
 
@@ -837,7 +888,8 @@ TOOLS: list[Tool] = [
         "commands_after",
         "Find commands matching the substring `pattern`; for each match, "
         "return the next ~3 commands run in the same session. Useful for "
-        "'what did I run after the failing migration?' queries.",
+        "'what did I run after the failing migration?' queries. Requires "
+        "the atuin source for session tracking.",
         CommandsAfterInput,
     ),
     _tool_for(
@@ -855,7 +907,10 @@ TOOLS: list[Tool] = [
     _tool_for(
         "recent",
         "Most-recent commands, optionally filtered by cwd prefix or hostname. "
-        "Time-ordered DESC, then id ASC for tie-break.",
+        "Time-ordered DESC. For shell sources that don't capture timestamps "
+        "(zsh and bash history files), commands are ordered by insertion "
+        "order (most recently indexed first), which approximates time-ordering "
+        "for typical single-session indexing.",
         RecentInput,
     ),
 ]

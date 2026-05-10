@@ -284,6 +284,13 @@ def _resolve_recall_binary() -> str:
     """
     bin_dir = Path(sys.executable).parent
     recall_bin = bin_dir / "recall"
+    # Windows console-script convention: pyproject.toml's
+    # [project.scripts] entry produces `recall.exe` under
+    # <venv>\Scripts\ on Windows. Path doesn't auto-append the
+    # extension; check both forms. (3.13 stdio-windows lane is
+    # the first Windows CI run.)
+    if not recall_bin.exists() and sys.platform == "win32":
+        recall_bin = bin_dir / "recall.exe"
     if not recall_bin.exists():
         raise RuntimeError(
             f"recall console script not found at {recall_bin}. Did `uv sync` install the package?"

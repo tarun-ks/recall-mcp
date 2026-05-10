@@ -1,24 +1,30 @@
-# Manual smoke procedure — MCP server (3.9 + 3.10)
+# Manual smoke procedure — MCP server
 
-This is the only thing exercising actual stdio-transport before
-3.11 lands the CI subprocess test. It's where SDK-runner integration
-bugs and stdout-pollution leaks would surface (the kind the in-process
-tests in `test_server.py` and `test_tools.py` can't reach).
+> **Per-client outcomes are recorded in [`docs/clients-tested.md`](../docs/clients-tested.md).**
+> This file is the canonical *procedure* (HOW to verify); `clients-tested.md`
+> is the *evidence* file (WHAT was observed when a client was last
+> verified). Update both when verifying a new client, and re-verify
+> per the cadence policy in CLAUDE.md "v1 launch-readiness gate (3.13)".
+
+This procedure exercises actual stdio-transport against `recall serve`.
+It catches SDK-runner integration bugs, stdout-pollution leaks, and
+real-MCP-client UX dimensions (rendering, tool palette behavior,
+natural-language summary quality) that the CI lanes can't reach.
 
 Run this procedure manually after every meaningful change to
 `src/recall/server.py`, `src/recall/tools.py`, `src/recall/cli.py::serve_cmd`,
 or `pyproject.toml` (mcp dep).
 
-The procedure has three sections:
-  - **Section A: 3.9-era initialize handshake** (was the whole smoke at 3.9).
-  - **Section B: 3.10 tool-call exercise** — one JSON-RPC `tools/call`
-    per tool, asserting shape and stdout cleanliness. Requires an
-    indexed DB at `~/.recall/db.sqlite` (build via `recall index`).
-  - **Section C: live MCP-client smoke (Claude Desktop)** — the
-    closest 3.10 will come to real-client testing before 3.13.
-    Configure `verify/3.10` server, confirm `tools/list` renders all
-    six with descriptions, run at least one `tools/call` and confirm
-    the response renders. Surface anything off-looking before merge.
+The procedure has four sections:
+  - **Section A: initialize handshake** (single-frame transport check).
+  - **Section B: tool-call exercise** — one JSON-RPC `tools/call`
+    per tool against a real indexed DB.
+  - **Section C: live MCP-client smoke (any client)** — the canonical
+    procedure each client in `docs/clients-tested.md` runs through.
+    Covers tool-palette rendering, error-as-guidance, embedder
+    lazy-load UX, natural-language summary quality.
+  - **Section D: stdio-cleanliness suite (3.11 / 3.12 local mirror)** —
+    M-series local re-run of the dedicated CI lanes.
 
 ## Prerequisites
 
@@ -279,66 +285,109 @@ count]` pairs), `mean_duration_ms`, `success_rate`, `by_source`,
 
 ---
 
-## Section C — Live MCP-client smoke (Claude Desktop)
+## Section C — Live MCP-client smoke (any client)
 
-This is the closest 3.10 will come to real-MCP-client testing
-before 3.13. Required step before squash-merge.
+The canonical procedure for verifying any MCP client against
+`recall-mcp`. Each entry in [`docs/clients-tested.md`](../docs/clients-tested.md)
+records the outcome of running this procedure on a specific
+client+OS+version combination.
 
-### Procedure
+Tests dimensions CI can't reach: tool-palette rendering, tool
+descriptions rendering, error-as-guidance vs error-as-traceback,
+embedder lazy-load UX, response rendering quality, and natural-
+language summary quality from the client's LLM.
 
-1. **Configure Claude Desktop** to use the `verify/3.10` build of
-   `recall serve`. Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
+### Configuration
 
-   ```json
-   {
-     "mcpServers": {
-       "recall": {
-         "command": "/path/to/repo/.venv/bin/recall",
-         "args": ["serve"]
-       }
-     }
-   }
+Each client has its own MCP-server config file/UI:
+
+- **Claude Desktop (macOS)**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Claude Desktop (Windows)**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Cursor (macOS)**: Cursor settings → MCP → add server entry
+- **Zed (macOS)**: `~/.config/zed/settings.json` under `context_servers`
+- **Cline VS Code (macOS)**: VS Code settings → Cline MCP server config
+
+Common config shape (paths/keys vary per client):
+
+```json
+{
+  "mcpServers": {
+    "recall": {
+      "command": "/path/to/repo/.venv/bin/recall",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Restart the client after editing config.
+
+### Procedure (run all 7 checks; record outcomes in clients-tested.md)
+
+1. **tools/list renders all 6 tools in palette.** Click the tools
+   indicator (icon/chip varies per client) and confirm: search,
+   find_in_project, commands_after, failed_recently, command_stats,
+   recent.
+
+2. **Tool descriptions render fully** (or note truncation if the
+   client truncates). Search description is the longest — this is
+   the truncation canary.
+
+3. **tools/call recent succeeds + renders readably.** Ask the client
+   something like "use the recent tool to show me my last 5 commands."
+   The response should render as a readable list/table/summary, not
+   a raw JSON wall.
+
+4. **tools/call command_stats with `pattern: "%"` (validation error)**
+   returns a clean user-facing error. Ask the client: "use
+   command_stats with pattern equal to a single percent sign." Confirm
+   the error renders as guidance — NOT a stack trace, NOT a JSON wall.
+
+5. **tools/call search triggers embedder lazy-load (~5s on first
+   call); client shows progress indicator OR returns result without
+   frozen UI.** Ask the client: "search my shell history for git
+   commands." First call pays the model load cost; subsequent calls
+   are fast.
+
+6. **No tracebacks visible** in the client UI for any of the above.
+
+7. **`~/.recall/logs/recall.log` has structured `tool=<name>
+   ok|state_error|value_error count=<N>` lines.** Run this in a
+   terminal to monitor live:
+   ```bash
+   tail -f ~/.recall/logs/recall.log | grep '"tool":'
    ```
+   Query text NOT logged (CLAUDE.md Q8 policy).
 
-   Restart Claude Desktop.
+### Natural-language summary observation
 
-2. **Confirm tools/list renders**: open a new conversation, click the
-   tools indicator (hammer/wrench icon), and verify all six tools
-   appear with their descriptions:
-   - search
-   - find_in_project
-   - commands_after
-   - failed_recently
-   - command_stats
-   - recent
+After each tools/call (steps 3, 4, 5), **observe how the client's
+LLM summarizes the result to the end user**. Note in the
+`docs/clients-tested.md` observations field if summary quality is:
 
-3. **Run at least one tools/call**: ask Claude Desktop something
-   like "use the recent tool to show me my last 5 commands" or
-   "search my shell history for git commands". Confirm:
-   - The response renders in the UI (no raw error blob)
-   - Result text is scrubbed (no real secrets visible — should be
-     `<REDACTED:...>` markers if your history had any)
-   - No stack-traces visible to the user
+- **Notably good**: uses structure intelligently (e.g. renders results
+  as a numbered table, picks meaningful fields, asks a useful
+  follow-up like "want help with anything related?")
+- **Notably bad**: verbatim JSON dump, ignores fields, hallucinates
+  content not in the result, fails to recover from a state-error
 
-4. **Check `~/.recall/logs/recall.log`** has structured INFO lines
-   like `tool=recent ok count=5`. Query text NOT logged (Q8 policy).
-
-### Assertion checklist
-
-- [ ] All six tools listed in Claude Desktop's tool palette
-- [ ] Tool descriptions render (truncated by client UI is fine, but
-      no missing/empty descriptions)
-- [ ] At least one `tools/call` runs end-to-end and renders
-- [ ] No tracebacks visible in client UI
-- [ ] No stdout-pollution (would manifest as broken JSON / dropped
-      messages from the client's perspective)
+This dimension is the hardest to test elsewhere; it materially
+affects v1 launch UX and is a key trust signal.
 
 ### What to do if anything looks off
 
-Surface the issue in the squash-merge PR comment **before merge**.
-This is the last opportunity to catch a real-MCP-client UX regression
-before the 3.13 documented-clients-tested checklist runs across
-multiple clients.
+If a test fails or surfaces a UX regression:
+
+1. **Capture the observation** in the relevant `docs/clients-tested.md`
+   entry's `Known Issues` subsection. Be specific: client+version,
+   what was expected, what was observed.
+2. **Decide severity:**
+   - **Recall bug** (response shape wrong, server crash, tracebacks
+     visible) → block 3.13 / file as v1 launch-blocker.
+   - **Client-side UX quirk** (truncation, layout glitch, slow first
+     render) → file as v1.x deferred entry; ship v1 with caveat.
+   - **Unclear** → investigate before deciding. Don't ship with
+     unclear state.
 
 ---
 

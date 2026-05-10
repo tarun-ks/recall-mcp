@@ -455,6 +455,31 @@ follow the same pattern: confirm via the AST check that the file
 isn't on a stdio path, then add a per-file-ignore with a comment
 linking back to this CLAUDE.md section.
 
+**Windows stdio lane (3.13).** A `stdio-windows` job on
+`windows-latest` runs the A+C+E+AST+T201 subset of the stdio
+cleanliness suite. Cold-cache test D is excluded — HF/torch
+Windows-specific behavior isn't stdio-cleanliness territory; would
+surface as "is torch working on Windows" rather than "are we leaking
+stdout." Windows MCP-client UX verification happens manually via
+the UTM VM session (CLAUDE.md "v1 launch-readiness gate (3.13)").
+
+**Windows test triage rule.** When a test fails on the
+`stdio-windows` lane:
+  - **Test fails in recall code path AND non-Windows lanes pass:**
+    real Windows bug. Block 3.13 (or whatever commit surfaced it)
+    until fixed.
+  - **Test fails in subprocess/pipe handling AND non-Windows lanes
+    pass:** classify as Windows test-infrastructure quirk (POSIX vs
+    Windows pipe semantics differ). Mark
+    `pytest.skip(reason="...", platform=='win32')` for that specific
+    test, document the reason in CLAUDE.md, file a v1.x deferred-
+    items entry, ship without the failing Windows test.
+  - **Unclear cause:** investigate to reach one of the above
+    categories before deciding. Don't ship with unclear Windows
+    state.
+  This decision tree was locked at 3.13 plan; future contributors
+  inherit the same triage rather than improvising under pressure.
+
 **Recorded session fixtures (3.12).** End-to-end MCP protocol
 scenarios live as JSONL files at `tests/fixtures/sessions/*.jsonl`
 and are replayed by `tests/test_recorded_sessions.py` in the same
@@ -1193,6 +1218,79 @@ When adding a new tool: pick the closest existing class. New error
 classes need a new row here AND a corresponding handler in
 `recall.tools.dispatch_tool`.
 
+## v1 launch-readiness gate (3.13)
+
+3.13 closes Phase 3 and gates the v1 announce. Two surfaces:
+
+**1. Stdio Windows CI lane (`stdio-windows`).** Permanent gate
+running on `windows-latest`, py3.12. Subset of stdio cleanliness
+tests: A initialize-only, C tools/call recent (no-index dispatch),
+E lazy-refresh subprocess, AST check, T201. Cold-cache D excluded
+per CLAUDE.md §5 "Windows stdio lane (3.13)".
+
+**2. Per-client UX verification matrix** at `docs/clients-tested.md`.
+Five entries: 4 macOS (Cursor, Claude Desktop, Zed, Cline VS Code)
++ 1 Windows (Claude Desktop via UTM VM). Each entry captures the
+7-item assertion-checklist outcome from `tests/manual_smoke.md`
+Section C, free-text observations including natural-language
+summary quality from the client's LLM, and a "Known issues"
+subsection that accumulates the v1.x punch list naturally.
+
+The procedure file (`tests/manual_smoke.md` Section C) says HOW
+to verify; the matrix file (`docs/clients-tested.md`) says WHAT
+was observed when each client was last verified. Different
+artifacts with different update cadences — don't conflate.
+
+### Cadence
+
+Re-verify `docs/clients-tested.md` entries when:
+1. Major recall version change (v1.0 → v1.1 → v2.0)
+2. Recall PR touches user-facing surface (tool descriptions,
+   output structure, error messages) — reviewer flags
+3. Client major version update (e.g. Claude Desktop 1 → 2).
+   Maintainer monitors manually for v1; automated tracking is
+   a v1.x deferred-items entry.
+
+### v1 launch-readiness contract
+
+Before v1 announce:
+
+- All entries in `docs/clients-tested.md` filled with **real
+  observations** — not placeholder text. Shipping `1/4 honestly`
+  with a README caveat is preferred over `4/4 carelessly`.
+  Maintainer fatigue or session limits are valid reasons to leave
+  an entry as `not yet verified`; fabricated observations are not.
+- `stdio-windows` CI lane green on main.
+- All Phase 3 commits (3.9-3.13) on main with green CI.
+
+### Pre-launch UTM VM session (Windows)
+
+Setup: install [UTM](https://mac.getutm.app/) (free, Apple Silicon
+native), download Microsoft's free Windows 11 ARM development VM,
+install Claude Desktop for Windows. Estimated 2-3 hour focused
+session. Fills the Windows entry in `docs/clients-tested.md`.
+
+If serious Windows-specific bugs surface during the session,
+document in "Known issues" + file as v1.x post-launch deferred
+items unless security-relevant. Don't block v1 launch on cosmetic
+Windows quirks.
+
+### Phase 4 boundary
+
+3.13 produces `docs/clients-tested.md`. Phase 4 quotes from it
+into the README's "Tested clients" table; adds CI status badges;
+writes the launch-day install/usage docs. 3.13 does NOT update
+the README itself; the README is Phase 4 owner.
+
+### Section C reframe (manual_smoke.md)
+
+`tests/manual_smoke.md` Section C was originally framed as
+"live MCP-client smoke (Claude Desktop)" at 3.10. 3.13 reframes
+it as "live MCP-client smoke (any client)" — the canonical
+procedure each client in the matrix runs through. The 7-item
+assertion-checklist + the natural-language-summary observation
+step live in Section C; outcomes flow into `docs/clients-tested.md`.
+
 ## Deferred items (file as GitHub issues at end of Phase 1)
 
 These were called out and intentionally deferred. File them as GitHub
@@ -1355,6 +1453,19 @@ don't get lost in chat history.
   proves regression prevention, the real-history audit proves
   real-world coverage. Land in the README's privacy / trust
   section at v1 launch. Tag: documentation, phase-4.
+- **README v1: explicit "rich UX requires atuin" framing** — Phase
+  4 README content. Surfaced at 3.13's clients-tested matrix
+  verification: zsh/bash readers don't capture cwd, hostname,
+  exit_code, duration_ms, or session_id (atuin captures all of
+  them). Two tools (`commands_after`, `failed_recently`) require
+  atuin's session-tracking + exit-code data to function; the
+  semantic-search core works without atuin. Frame in README as
+  value-add: "atuin integration enables richest UX; without it,
+  semantic search + frequency analytics still work fully."
+  Familiar "install X for full experience" pattern. NOT a bug —
+  honest limitation that the README needs to surface upfront so
+  drive-by visitors understand the install matrix before they
+  install. Tag: documentation, phase-4.
 - **Record-mode for fixture authoring (3.12).** Hand-writing
   recorded session fixtures scales for ≤10 scenarios. If the
   fixture count grows past ~10, build a record-mode helper that
@@ -1363,6 +1474,23 @@ don't get lost in chat history.
   manual sentinel substitution as a follow-up step). Trigger:
   fixture count in `tests/fixtures/sessions/` exceeds 10. Tag:
   tech-debt, eval-quality, post-3.12.
+- **Concurrent-dispatch handler invariants (3.12 §4 follow-up).**
+  The 3.12 §4 decision skipped concurrency in recorded fixtures on
+  the assumption that MCP stdio's single-thread transport made it
+  irrelevant. The 2026-05-10 F5 diagnostic spike confirmed dispatch
+  IS concurrent at the asyncio layer — handlers interleave. The
+  original concern (long-call queues short-call) was refuted; the
+  inverted concern is real: handlers must remain correct under
+  interleaved execution. v1's handlers are read-only against shared
+  state with `_embedder_lock` for the one mutation, so v1 is
+  correct. Future tools mutating shared state (cache invalidation,
+  runtime config changes, indexer-while-server scenarios beyond
+  the documented "unsupported" framing) need explicit concurrent-
+  dispatch race testing. Concrete addition when triggered: recorded
+  fixture exercising "long-call in flight, short call dispatched
+  concurrently — short call's response arrives in expected wall-
+  clock window AND reflects consistent shared-state snapshot." Tag:
+  tech-debt, eval-quality, post-3.13.5.
 - **Lane split (transport-cleanliness vs protocol-conformance)**
   — v1.x post-launch. Currently 3.11's stdio cleanliness tests
   and 3.12's recorded session replay tests share the single
@@ -1395,12 +1523,29 @@ don't get lost in chat history.
   content. Add CI badge to README so HN visitors can see the
   invariant is enforced (the trust story). Tag: documentation,
   phase-4.
-- **v1.0 launch checklist: cold-cache subprocess test on local
-  M-series Mac.** Run before announce; append result to
-  docs/clients-tested.md (lands in Commit 3.13). The Linux-only
-  CI gate is sufficient for catch-on-PR; M-series adds confidence
-  that MPS warmup messages don't leak. Tag: v1-launch-blocker,
-  must-do-before-announce.
+- **macOS desktop client matrix expansion (v1.0.1).** v1 ships
+  with `docs/clients-tested.md` containing 1/6 filled entries
+  (Claude.ai web MCP connector). The 4 macOS desktop/IDE clients
+  (Cursor, Claude Desktop, Zed, Cline VS Code) and 1 Windows entry
+  are explicitly `not yet verified` — Section C is human-eyeball
+  work the v1 launch sprint isn't budgeting time for. The
+  Claude.ai web entry IS load-bearing (it surfaced findings
+  F1-F5; provides the v1 README's trust signal). v1.0.1 task:
+  run Section C against the 4 macOS clients in the locked §9
+  order (Cursor → Claude Desktop → Zed → Cline) and fill entries
+  with real observations. UTM VM Windows session as a separate
+  v1.0.1 sub-task. This decision was the 2026-05-10 launch-sprint
+  trade-off: 1/6 honest > 6/6 aspirational. Tag:
+  v1.0.1-launch-followup, documentation.
+- **clients-tested.md staleness policy when client major-versions
+  update** — v1.x post-launch. Each entry in `docs/clients-tested.md`
+  records the client version at last verification. When a client
+  ships a major version update (e.g. Claude Desktop 1 → 2), the
+  matching entry is potentially stale (UI rewrite, MCP integration
+  changes, etc.). v1 relies on maintainer manual monitoring; v1.x
+  could automate (e.g. periodic re-verification reminder, or
+  semver-aware staleness flag in the README's "Tested clients"
+  table). Tag: documentation, post-v1.
 - **Refactor `src/recall/indexer.py` `print(..., file=sys.stderr)`
   calls to use logging.** Phase 4 polish, low priority. Currently
   the indexer's user-facing progress lines (during `recall index`

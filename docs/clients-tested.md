@@ -1,5 +1,19 @@
 # clients-tested.md
 
+> **v1 launch status:** 1/6 entries filled with real observations
+> (Claude.ai web MCP connector — the bug-surfacing surface that
+> produced findings F1-F5 below). Per the locked launch-readiness
+> contract (CLAUDE.md "v1 launch-readiness gate (3.13)"), 4 macOS
+> desktop/IDE clients + 1 Windows entry are explicitly `not yet
+> verified` — manual UX verification is human-eyeball work the v1
+> launch sprint isn't budgeting time for. Tracked as v1.0.1
+> deliverable: "macOS desktop client matrix expansion."
+>
+> The Claude.ai web entry is the load-bearing one: it surfaced the
+> findings the v1 README's trust signal depends on, and the F1-F5
+> evidence trail in this file documents recall's posture toward
+> shipping bugs honestly with explicit fix paths.
+
 Per-client verification matrix for `recall-mcp`. Each entry captures:
 client+OS+recall versions, date verified, the 7-item assertion-
 checklist outcome from [`tests/manual_smoke.md`](../tests/manual_smoke.md)

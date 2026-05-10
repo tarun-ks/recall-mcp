@@ -1523,6 +1523,20 @@ don't get lost in chat history.
   content. Add CI badge to README so HN visitors can see the
   invariant is enforced (the trust story). Tag: documentation,
   phase-4.
+- **macOS desktop client matrix expansion (v1.0.1).** v1 ships
+  with `docs/clients-tested.md` containing 1/6 filled entries
+  (Claude.ai web MCP connector). The 4 macOS desktop/IDE clients
+  (Cursor, Claude Desktop, Zed, Cline VS Code) and 1 Windows entry
+  are explicitly `not yet verified` — Section C is human-eyeball
+  work the v1 launch sprint isn't budgeting time for. The
+  Claude.ai web entry IS load-bearing (it surfaced findings
+  F1-F5; provides the v1 README's trust signal). v1.0.1 task:
+  run Section C against the 4 macOS clients in the locked §9
+  order (Cursor → Claude Desktop → Zed → Cline) and fill entries
+  with real observations. UTM VM Windows session as a separate
+  v1.0.1 sub-task. This decision was the 2026-05-10 launch-sprint
+  trade-off: 1/6 honest > 6/6 aspirational. Tag:
+  v1.0.1-launch-followup, documentation.
 - **clients-tested.md staleness policy when client major-versions
   update** — v1.x post-launch. Each entry in `docs/clients-tested.md`
   records the client version at last verification. When a client

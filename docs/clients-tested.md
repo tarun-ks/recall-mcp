@@ -61,15 +61,41 @@ Before v1 announce:
 
 ---
 
-## Pending fixes (3.13.5)
+## Fixed in 3.13.5
 
-Surfaced during the Claude.ai MCP connector verification session that
-exercised real tools/call dispatch against an indexed corpus. These
-findings predate 3.13 (introduced in 3.10's tool implementations);
-3.13's matrix surfaced them. Both ship as a 3.13.5 hotfix on a fresh
-branch after 3.13 squash-merges.
+Findings F1-F5 were surfaced during the Claude.ai MCP connector
+verification session that exercised real tools/call dispatch against
+an indexed corpus. The findings predate 3.13 (introduced in 3.10's
+tool implementations); 3.13's matrix surfaced them. 3.13.5 lands
+the fixes as a follow-up commit on main:
 
-### F1 — `commands_after` returns empty `following` for non-atuin indexes
+- **F1** ✅ `commands_after` now atuin-required (parallel to
+  `failed_recently`); returns clean state-error with the locked
+  message text. The parenthetical surfaces the cross-session-
+  conflation correctness reason.
+- **F2** ✅ Baseline `setdefault("required", [])` shim applied
+  in `_tool_for()`; every tool's JSON schema now explicitly
+  declares `required` (even as `[]`). `find_in_project` filtering
+  investigation deferred to matrix verification (Cursor / Zed
+  entries will determine whether shim alone is sufficient or a
+  follow-up fix is needed).
+- **F4** ✅ `recent` uses hybrid ORDER BY: real-ts rows first
+  (by ts DESC), then ts=0 rows by id DESC (insertion order as
+  time-proxy). Tool description updated to surface the fallback
+  honestly: "approximates time-ordering for typical single-session
+  indexing."
+- **F5** ⚠️ No fix shipped — bug observed once, asyncio dispatch
+  serialization hypothesis empirically refuted by the 2026-05-10
+  diagnostic spike, no reproduction path identified. Monitoring
+  framing unchanged: user-feedback channel for v1.0.1 with
+  recall.log + py-spy capture instructions.
+
+The detailed root-cause analysis + fix paths for each finding live
+in the subsections below — preserved as the evidence trail readers
+of clients-tested.md inherit. References to the 3.13.5 squash commit
+SHA are filled by `git log` (this file's history).
+
+### F1 — `commands_after` returns empty `following` for non-atuin indexes ✅ Fixed in 3.13.5
 
 **Symptom:** When the index has only zsh/bash entries (no atuin),
 `commands_after` returns `pattern_match` correctly but `following`
@@ -108,7 +134,7 @@ trustworthiness; conflating sessions corrupts that.
 
 **Cost:** ~10 LoC + 1 fixture update + tool description tweak.
 
-### F2 — `find_in_project` not appearing in client tool palette (5/6 visible)
+### F2 — `find_in_project` not appearing in client tool palette (5/6 visible) ✅ Shim landed in 3.13.5; investigation pending
 
 **Symptom:** Out of the 6 registered tools, 5 appear in the Claude.ai
 MCP connector's tool palette: `search`, `commands_after`,
@@ -161,7 +187,7 @@ filing as upstream client bug).
 **Cost:** ~3 LoC for the shim + ~30 min investigation effort + fix
 shape TBD. Probably ~10-30 LoC total.
 
-### F4 — `recent` returns wrong-order data on zsh-only indexes
+### F4 — `recent` returns wrong-order data on zsh-only indexes ✅ Fixed in 3.13.5
 
 **Symptom:** `recent` (the canonical "show me my most recent
 commands" tool) returns OLDEST-first commands when the index is
@@ -208,7 +234,7 @@ same pattern; v1 only `recent` needs it for non-atuin users.
 **Cost:** ~5 LoC (SQL change) + 1-2 fixture updates + tool
 description tweak.
 
-### F5 — `failed_recently` 4+ minute hang (observed once, monitoring)
+### F5 — `failed_recently` 4+ minute hang (observed once, monitoring) ⚠️ No code fix; monitoring
 
 **Symptom (single observation):** During a Claude.ai MCP connector
 session that had previously made multiple semantic search calls

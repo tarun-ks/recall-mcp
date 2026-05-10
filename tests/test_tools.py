@@ -572,6 +572,84 @@ class TestRecentHandler:
         assert len(h) == 16
         assert all(c in "0123456789abcdef" for c in h)
 
+    # F4 (3.13.5): hybrid ORDER BY for ts=0 fallback.
+    #
+    # zsh/bash readers emit ts=0 when EXTENDED_HISTORY is absent. With
+    # all rows tied at ts=0, pre-fix `ORDER BY ts DESC, id ASC` collapsed
+    # to id-ASC = oldest-first. The fix uses
+    # `ORDER BY (CASE WHEN ts > 0 THEN 0 ELSE 1 END), ts DESC, id DESC`
+    # so real-ts rows come first, then ts=0 rows by id-DESC (most-recent
+    # insertion first as time-proxy).
+
+    def test_all_ts_zero_falls_back_to_id_desc(self, db_with_index, tmp_path: Path) -> None:
+        """F4 marquee test: when all ts=0 (typical zsh-only index), `recent`
+        returns most-recent-INSERTED first (id DESC), NOT oldest-first.
+
+        This is the regression-prevention test for the silent bug F4
+        identified — pre-fix behavior was id ASC, contradicting the tool's
+        'most-recent' semantics.
+        """
+        _insert_command(db_with_index, source="zsh", text="first", ts=0)
+        _insert_command(db_with_index, source="zsh", text="second", ts=0)
+        _insert_command(db_with_index, source="zsh", text="third", ts=0)
+        state = _make_state(db_path=tmp_path / "db.sqlite", has_index=True)
+        payload, count, _ = _run(
+            dispatch_tool(
+                "recent",
+                {"limit": 10},
+                state=state,
+                db_conn=db_with_index,
+                encode=_make_fake_encode({}),
+            )
+        )
+        assert count == 3
+        texts = [h["text"] for h in payload["results"]]
+        # id DESC (most-recently-inserted first), NOT id ASC
+        assert texts == ["third", "second", "first"]
+        # Off-by-one defense: explicit assertion that catches accidental
+        # id ASC if a future refactor regresses the SQL.
+        ids = [h["id"] for h in payload["results"]]
+        assert ids[0] > ids[-1], (
+            "F4 regression: results ordered id-ASC (oldest-first); "
+            "expected id-DESC (most-recent insertion first) when all ts=0"
+        )
+
+    def test_mixed_ts_orders_real_ts_first_then_id_desc(
+        self, db_with_index, tmp_path: Path
+    ) -> None:
+        """Mixed-source index: atuin rows have real ts; zsh rows have ts=0.
+        Hybrid ORDER BY should put atuin rows first (by ts DESC) then zsh
+        rows (by id DESC).
+        """
+        # Insertion order: zsh (ts=0), then atuin (ts=200), then zsh (ts=0),
+        # then atuin (ts=100). Result should be:
+        #   atuin ts=200 first (real-ts group, sorted DESC)
+        #   atuin ts=100 second
+        #   zsh row inserted later (higher id) third (ts=0 group, id DESC)
+        #   zsh row inserted earlier (lower id) fourth
+        _insert_command(db_with_index, source="zsh", text="zsh-old-insert", ts=0)
+        _insert_command(db_with_index, source="atuin", text="atuin-newer", ts=200)
+        _insert_command(db_with_index, source="zsh", text="zsh-newer-insert", ts=0)
+        _insert_command(db_with_index, source="atuin", text="atuin-older", ts=100)
+        state = _make_state(db_path=tmp_path / "db.sqlite", has_index=True)
+        payload, count, _ = _run(
+            dispatch_tool(
+                "recent",
+                {"limit": 10},
+                state=state,
+                db_conn=db_with_index,
+                encode=_make_fake_encode({}),
+            )
+        )
+        assert count == 4
+        texts = [h["text"] for h in payload["results"]]
+        assert texts == [
+            "atuin-newer",  # real-ts group, ts=200 first
+            "atuin-older",  # real-ts group, ts=100 second
+            "zsh-newer-insert",  # ts=0 group, higher id (later insertion)
+            "zsh-old-insert",  # ts=0 group, lower id (earlier insertion)
+        ]
+
 
 class TestCommandStatsHandler:
     def test_aggregates(self, db_with_index, tmp_path: Path) -> None:
@@ -715,10 +793,20 @@ class TestCommandsAfterHandler:
         following_texts = [c["text"] for c in seq["following"]]
         assert following_texts == ["check status", "rollback"]
 
-    def test_session_none_returns_empty_following(self, db_with_index, tmp_path: Path) -> None:
+    def test_no_atuin_source_returns_clean_error(self, db_with_index, tmp_path: Path) -> None:
+        """F1 (3.13.5): commands_after requires atuin source data for
+        session-boundary tracking. Non-atuin index returns a clean state-
+        error with the user-facing message; the message surfaces the
+        correctness reason (cross-session conflation).
+
+        Pre-F1 behavior was silent UX degradation (matched pattern,
+        empty `following`); replaced by explicit error surface so the
+        LLM client + user understand why no sequence data is available.
+        """
+        # Only zsh rows — no atuin records in the index.
         _insert_command(db_with_index, source="zsh", text="orphan_cmd", ts=100, session_id=None)
         state = _make_state(db_path=tmp_path / "db.sqlite", has_index=True)
-        payload, _count, _ = _run(
+        payload, count, is_err = _run(
             dispatch_tool(
                 "commands_after",
                 {"pattern": "orphan_cmd"},
@@ -727,7 +815,14 @@ class TestCommandsAfterHandler:
                 encode=_make_fake_encode({}),
             )
         )
-        assert payload["results"][0]["following"] == []
+        assert is_err is True
+        assert count == 0
+        msg = payload["error"]
+        assert "commands_after requires atuin" in msg
+        # Locked message text includes the cross-session-conflation
+        # parenthetical surfacing the correctness reason
+        assert "conflate commands across concurrent terminal sessions" in msg
+        assert "https://atuin.sh" in msg
 
 
 class TestSearchHandler:
@@ -860,6 +955,34 @@ class TestToolsRegistry:
         for t in TOOLS:
             assert t.inputSchema is not None
             assert "properties" in t.inputSchema, f"{t.name} missing properties"
+
+    def test_each_tool_schema_includes_required_key(self) -> None:
+        """F2 (3.13.5) shim: every tool's JSON Schema must include the
+        ``required`` key (even if []), not omit it.
+
+        Pydantic 2 omits the key when no fields are required; some MCP
+        clients filter tools whose schema lacks the declaration. The
+        shim in `_tool_for()` sets it explicitly. This test asserts the
+        contract.
+        """
+        from recall.tools import TOOLS
+
+        for t in TOOLS:
+            assert "required" in t.inputSchema, (
+                f"{t.name} schema missing 'required' key — F2 shim broken"
+            )
+            assert isinstance(t.inputSchema["required"], list), f"{t.name} 'required' is not a list"
+        # Sanity: at least one tool with required parameters (search has
+        # 'query'); at least one without (recent has all defaults). The
+        # shim affects the no-required-params case specifically.
+        recent_schema = next(t.inputSchema for t in TOOLS if t.name == "recent")
+        assert recent_schema["required"] == [], (
+            "recent has no required params; shim should produce []"
+        )
+        search_schema = next(t.inputSchema for t in TOOLS if t.name == "search")
+        assert search_schema["required"] == ["query"], (
+            "search's required params should be unchanged by the shim"
+        )
 
     def test_descriptions_are_non_empty(self) -> None:
         from recall.tools import TOOLS

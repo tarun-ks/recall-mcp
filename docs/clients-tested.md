@@ -94,31 +94,42 @@ trustworthiness; conflating sessions corrupts that.
 
 **Cost:** ~10 LoC + 1 fixture update + tool description tweak.
 
-### F2 — only 4 of 6 tools registered in MCP client
+### F2 — `find_in_project` not appearing in client tool palette (5/6 visible)
 
-**Symptom:** `recent` and `failed_recently` not appearing in the
-client's tool palette. Other 4 tools (search, find_in_project,
-commands_after, command_stats) appear normally.
+**Symptom:** Out of the 6 registered tools, 5 appear in the Claude.ai
+MCP connector's tool palette: `search`, `commands_after`,
+`failed_recently`, `command_stats`, `recent`. **`find_in_project`
+specifically is missing.** Original 3.13 framing of this finding
+("only 4/6 visible") was wrong; updated observation has 5/6 visible
+with `find_in_project` as the lone holdout.
 
-**Hypothesis:** The 4 visible tools all have at least one required
-parameter (`query` or `pattern`); the 2 missing tools have no
-required parameters (all fields default or nullable). Pydantic v2's
-`model_json_schema()` **omits the `"required"` key entirely when
-no fields are required** (vs emitting `"required": []`). Some MCP
-clients filter or hide tools whose schema lacks a `required`
-declaration.
+**Earlier hypothesis refuted.** The "missing required-key" hypothesis
+applied to tools with no required parameters; `find_in_project` HAS
+a required parameter (`query`), so that hypothesis can't explain why
+it specifically is filtered.
 
-**Verification needed before fix (3.13.5 plan should include):**
-1. Capture actual tools/list JSON from a fresh Claude Desktop session
-   against current main; compare to 3.10 manual smoke baseline.
+**Open hypothesis space (none confirmed):**
+1. Client treats `find_in_project` as a duplicate/subset of `search`
+   (overlapping semantic surface; both take `query` + an optional
+   path filter) and dedups one.
+2. Description content trips a content filter (mentions environment
+   variable `MCP_CLIENT_CWD`, mentions filesystem paths).
+3. Position 2 in TOOLS list interacts with a client UI heuristic.
+
+**Verification needed (3.13.5 plan):**
+1. Capture actual `tools/list` JSON the Claude.ai MCP connector
+   received; compare to 3.10 manual smoke baseline schema for
+   `find_in_project`.
 2. Test the same recall server against one other MCP client (Cursor
-   or Zed). If `recent`/`failed_recently` appear there → Claude.ai
-   MCP connector-specific filtering, fix framed as "compatibility
-   shim." If they don't appear in any client → JSON Schema convention
-   issue, fix framed as "spec compliance."
+   or Zed). If `find_in_project` appears there → Claude.ai-connector-
+   specific filtering. If it doesn't appear in any client → some
+   shape of our tool registration is incompatible.
 
-**Fix path (3.13.5) — same regardless of root cause:**
-3-line `setdefault("required", [])` in `_tool_for()`:
+**Fix path (3.13.5) — baseline + investigation:**
+
+Apply the original 3-line `setdefault("required", [])` shim in
+`_tool_for()` regardless. Doesn't change semantics; makes schemas
+explicit; helps any client that filters on missing-required-key:
 
 ```python
 def _tool_for(name, description, model):
@@ -127,10 +138,112 @@ def _tool_for(name, description, model):
     return Tool(name=name, description=description, inputSchema=schema)
 ```
 
-Doesn't change semantics; makes the schema explicit. Backwards-
-compatible with clients that already work.
+**This shim is unlikely to be the load-bearing fix for find_in_project
+specifically** (its schema already has `"required": ["query"]`). The
+investigation step above identifies the real cause; the fix shape
+adjusts based on outcome (description rewording, schema tweak, or
+filing as upstream client bug).
 
-### Per-client cross-reference
+**Cost:** ~3 LoC for the shim + ~30 min investigation effort + fix
+shape TBD. Probably ~10-30 LoC total.
+
+### F4 — `recent` returns wrong-order data on zsh-only indexes
+
+**Symptom:** `recent` (the canonical "show me my most recent
+commands" tool) returns OLDEST-first commands when the index is
+zsh-only. Tool description claims "Time-ordered DESC, id ASC
+tie-break"; actual behavior contradicts the description silently.
+
+**Root cause:** zsh's `EXTENDED_HISTORY` flag is not always set;
+when absent, the zsh source emits entries with `ts = 0` (unknown
+timestamp, per HistorySource protocol). With `ts` uniformly 0
+across the result set, the tie-break (`id ASC`) dominates →
+oldest-insertion-first. Same silent-degradation shape as F1
+(commands_after): tool succeeds, returns data, but data doesn't
+match documented semantics.
+
+**Fix path (3.13.5):** Hybrid ORDER BY in `_handle_recent`. When
+`ts` is known (>0), use it; when unknown (=0), fall back to
+insertion order (`id DESC`) as a time-proxy:
+
+```sql
+ORDER BY
+  CASE WHEN ts > 0 THEN 0 ELSE 1 END,  -- real-ts rows first
+  ts DESC,
+  id DESC                              -- fallback: most-recent insertion first
+```
+
+This treats `ts = 0` as "unknown timestamp; use insertion order"
+rather than as "literally epoch-zero." Mixed-source indexes
+(atuin + zsh, where atuin has real `ts` and zsh has 0) get
+atuin rows first by ts, then zsh rows by id-descending — both
+groups in most-recent-first order.
+
+**Why not atuin-required (parallel to F1)?** `recent` is the most
+basic tool — "show me my history." Forcing atuin for it is too
+aggressive for v1. `id DESC` is a correctness-preserving fallback
+(insertion order is ~time order for shell history) without the
+cross-session-conflation risk that ruled out the heuristic for
+`commands_after` (where the question is causal: "what came after
+X").
+
+**Same fix applies anywhere we order by `ts`.** Other handlers
+(`commands_after` post-F1-fix, `failed_recently`) can use the
+same pattern; v1 only `recent` needs it for non-atuin users.
+
+**Cost:** ~5 LoC (SQL change) + 1-2 fixture updates + tool
+description tweak.
+
+### F5 — `failed_recently` 4+ minute hang (observed once, monitoring)
+
+**Symptom (single observation):** During a Claude.ai MCP connector
+session that had previously made multiple semantic search calls
+against an indexed corpus, `failed_recently` against a non-atuin
+index hung for 4+ minutes. Claude.ai's connector emitted a "MCP
+server may be crashed" timeout warning. Re-running the same call
+against the same index returned the clean state-error in ~8ms.
+
+**Original hypothesis (asyncio dispatch serialization) — REFUTED.**
+Diagnostic spike (2026-05-10) confirmed: SDK dispatch is concurrent.
+Fired `failed_recently` 50ms after a cold-cache `search` (24-second
+model load); `failed_recently` returned a clean state-error in 8ms
+while `search` was still 24 seconds away from completing. Recall log
+captured both handler dispatches in the same wall-clock second:
+
+```
+09:58:06 INFO recall.server: lazy-loading embedder (first tool call)
+09:58:06 INFO recall.server.tools tool=failed_recently state_error count=0
+09:58:30 INFO recall.server: embedder ready (model=BAAI/bge-small-en-v1.5, dim=384)
+09:58:30 INFO recall.server.tools tool=search ok count=3
+```
+
+Asyncio scheduling correctly interleaves handlers; the embedder
+lock doesn't block unrelated tool calls; the SDK does NOT serialize
+at the dispatch layer (despite serializing in the simple two-fast-
+handler case from the 3.12 spike).
+
+**Hypothesis space remaining (none confirmed):**
+- Claude.ai MCP connector-specific behavior under load (transport
+  framing, request batching, network-side retry)
+- Transient OS-level pipe stall
+- Network/transport-level glitch specific to that session
+
+**Status: monitoring. No code fix to ship.** Without reproduction,
+there's no fix to verify. Cannot ship a fix against an unreproducible
+bug — would have no way to know if the fix worked.
+
+**User feedback channel for v1.0.1:** if this recurs, we want
+diagnostic data to investigate. **If you encounter this:**
+
+1. File a GitHub issue with the contents of `~/.recall/logs/recall.log`
+   from the affected session (timestamp window around the hang).
+2. If you can reproduce it: `py-spy dump --pid $(pgrep -f 'recall serve')`
+   while the hang is in progress and attach the stack trace.
+3. Note the client (Claude.ai web, Claude Desktop, Cursor, etc.) and
+   what tool calls preceded the hang in the same session.
+
+This converts F5 from launch-blocker into a v1.0.1 user-feedback
+channel.
 
 Each client's "Known Issues" subsection below cross-references this
 "Pending fixes (3.13.5)" section rather than restating the findings.
@@ -147,6 +260,71 @@ add: "atuin integration enables richest UX; without it, semantic
 search + frequency analytics still work fully." Familiar
 "install X for full experience" pattern. Tracked as Phase 4
 deferred entry in CLAUDE.md.
+
+---
+
+## Claude.ai web (MCP connector) — first filled-in entry
+
+| field           | value |
+| --------------- | ----- |
+| Client          | Claude.ai web app, MCP connector surface |
+| Client version  | (web app — version N/A; verified against then-current production) |
+| OS              | N/A (browser-based; Claude.ai's connector is the MCP host) |
+| Recall version  | verify/3.13 @ commit `43d652b` (3.13 + evidence trail) |
+| Date verified   | 2026-05-09 — 2026-05-10 (multi-session verification surfaced F1, F2, F4, F5) |
+
+**Important framing**: this entry uses Claude.ai's MCP connector — a
+web-app surface, not a desktop tool palette. Verification done via
+AI assistant intermediating tool calls; **rendering and natural-
+language summary observations are N/A for this client surface** — the
+MCP connector returns structured data to Claude.ai, which the
+assistant LLM may further summarize, but there's no end-user "tool
+palette" UI to evaluate the way Claude Desktop, Cursor, Zed, or Cline
+have.
+
+This entry's value is its role as the **bug-surfacing surface**. The
+verification session against this client is what produced findings
+F1-F5 listed in "Pending fixes (3.13.5)" above. Subsequent macOS
+clients (Cursor, Claude Desktop, Zed, Cline) verify the UX dimensions
+that don't apply here.
+
+### Assertion checklist
+
+| # | check                                                                          | result |
+| - | ------------------------------------------------------------------------------ | ------ |
+| 1 | tools/list renders all 6 tools                                                 | **fail** — 5/6 visible; `find_in_project` missing (see F2) |
+| 2 | tool descriptions render fully                                                 | pass (visible tools' descriptions rendered fully in the assistant's tool-discovery context) |
+| 3 | tools/call recent succeeds + renders readably                                  | **fail** — succeeds but returns wrong-order data on zsh-only index (see F4) |
+| 4 | tools/call command_stats `pattern: "%"` returns clean user-facing error       | pass — clean validation error text returned in milliseconds |
+| 5 | tools/call search triggers embedder load; client shows progress                | pass — verified via 2026-05-10 spike: 24s cold-cache load, no frozen state |
+| 6 | no tracebacks visible to user                                                  | pass |
+| 7 | recall.log shows structured `tool=<name>` lines                                | pass — verified via `tail -f ~/.recall/logs/recall.log \| grep '"tool":'` |
+
+### Observations
+
+The verification value of this client surface is bug-surfacing, not
+UX evaluation. AI-assistant-mediated tool dispatch exposes correctness
+issues (data shape, response timing, error rendering) that don't
+require visual UI. Findings F1-F5 above were all surfaced through
+this surface; tooling for client-specific UX (palette rendering,
+natural-language summary quality, tool-call discoverability in the
+chat flow) is the natural complement run from the macOS desktop +
+IDE clients below.
+
+One additional observation worth noting (not a bug, observable in
+this surface): when assistant reasoning uses `commands_after` against
+a zsh-only index and gets empty `following`, the LLM correctly
+recognizes the absence of useful sequence data and either suggests
+running `recall index --source atuin` or moves to a different tool —
+suggesting the LLM has reasonable failure recovery behavior even
+with the current silent-degradation bug. F1's fix improves this
+further by making the limitation explicit at the protocol layer.
+
+### Known issues
+
+- See top-level **"Pending fixes (3.13.5)"** section. F1-F5 were all
+  surfaced from this client surface during the 2026-05-09 — 2026-05-10
+  verification sessions.
 
 ---
 

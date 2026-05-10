@@ -1474,6 +1474,23 @@ don't get lost in chat history.
   manual sentinel substitution as a follow-up step). Trigger:
   fixture count in `tests/fixtures/sessions/` exceeds 10. Tag:
   tech-debt, eval-quality, post-3.12.
+- **Concurrent-dispatch handler invariants (3.12 §4 follow-up).**
+  The 3.12 §4 decision skipped concurrency in recorded fixtures on
+  the assumption that MCP stdio's single-thread transport made it
+  irrelevant. The 2026-05-10 F5 diagnostic spike confirmed dispatch
+  IS concurrent at the asyncio layer — handlers interleave. The
+  original concern (long-call queues short-call) was refuted; the
+  inverted concern is real: handlers must remain correct under
+  interleaved execution. v1's handlers are read-only against shared
+  state with `_embedder_lock` for the one mutation, so v1 is
+  correct. Future tools mutating shared state (cache invalidation,
+  runtime config changes, indexer-while-server scenarios beyond
+  the documented "unsupported" framing) need explicit concurrent-
+  dispatch race testing. Concrete addition when triggered: recorded
+  fixture exercising "long-call in flight, short call dispatched
+  concurrently — short call's response arrives in expected wall-
+  clock window AND reflects consistent shared-state snapshot." Tag:
+  tech-debt, eval-quality, post-3.13.5.
 - **Lane split (transport-cleanliness vs protocol-conformance)**
   — v1.x post-launch. Currently 3.11's stdio cleanliness tests
   and 3.12's recorded session replay tests share the single
